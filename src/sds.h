@@ -43,14 +43,28 @@ typedef char *sds;
 
 /* Note: sdshdr5 is never used, we just access the flags byte directly.
  * However is here to document the layout of type 5 SDS strings. */
+
+/* __attribute__ ((__packed__)) 表示指定gcc编译器, 对这个结构体不对齐内存,
+ * 即, 整个结构体的大小, 就是里面各个变量长度的总和
+ */
 struct __attribute__ ((__packed__)) sdshdr5 {
     unsigned char flags; /* 3 lsb of type, and 5 msb of string length */
     char buf[];
 };
+
+/*
+ * 在这里, 设计sdshdr8, sdshdr16, sdshdr32, sdshdr64这几种结构体的目的是为了
+ * 节省内存, 可以根据要保存的字符串长度选用不同的头部大小.
+ */
+
 struct __attribute__ ((__packed__)) sdshdr8 {
+    // 已存储的字符串长度
     uint8_t len; /* used */
+    // 能存储的字符串最大容量, 不包括SDS的头部和结尾的NULL字符
     uint8_t alloc; /* excluding the header and null terminator */
+    // 标志位, 低三位表示sds头部类型, 高5位没有使用
     unsigned char flags; /* 3 lsb of type, 5 unused bits */
+    // 字符数组, 存储字符串
     char buf[];
 };
 struct __attribute__ ((__packed__)) sdshdr16 {
@@ -72,6 +86,7 @@ struct __attribute__ ((__packed__)) sdshdr64 {
     char buf[];
 };
 
+// flags的低三位表示不同类型的sdshdr
 #define SDS_TYPE_5  0
 #define SDS_TYPE_8  1
 #define SDS_TYPE_16 2
@@ -79,16 +94,24 @@ struct __attribute__ ((__packed__)) sdshdr64 {
 #define SDS_TYPE_64 4
 #define SDS_TYPE_MASK 7
 #define SDS_TYPE_BITS 3
+
+// 因为sdshdr是不对齐内存的, 所以sds和sdshdr是内存连续的, 当我们获得sds时, 只需要sds-1就可以得到flags字段,
+// 减去sizeof(struct sdshdrxx)就可以得到sdshdr的起始地址
+
+// 返回一个指向sdshdr的起始地址的指针
 #define SDS_HDR_VAR(T,s) struct sdshdr##T *sh = (void*)((s)-(sizeof(struct sdshdr##T)));
+
+// 获取sdshdr的起始地址
 #define SDS_HDR(T,s) ((struct sdshdr##T *)((s)-(sizeof(struct sdshdr##T))))
 #define SDS_TYPE_5_LEN(f) ((f)>>SDS_TYPE_BITS)
 
+// 获取sds(也就是buf这个字符串数组)中存储的字符串的长度
 static inline size_t sdslen(const sds s) {
-    unsigned char flags = s[-1];
-    switch(flags&SDS_TYPE_MASK) {
+    unsigned char flags = s[-1];    // 同上面的描述, 内存连续, 可以直接获得flags
+    switch(flags&SDS_TYPE_MASK) {   // 获取头部类型
         case SDS_TYPE_5:
             return SDS_TYPE_5_LEN(flags);
-        case SDS_TYPE_8:
+        case SDS_TYPE_8:            // 获取到头部类型后, 将指针移到sdshdr的头部, 直接获取len的值
             return SDS_HDR(8,s)->len;
         case SDS_TYPE_16:
             return SDS_HDR(16,s)->len;
@@ -100,6 +123,7 @@ static inline size_t sdslen(const sds s) {
     return 0;
 }
 
+// 获取sds中剩余可用的内存大小
 static inline size_t sdsavail(const sds s) {
     unsigned char flags = s[-1];
     switch(flags&SDS_TYPE_MASK) {
@@ -108,7 +132,7 @@ static inline size_t sdsavail(const sds s) {
         }
         case SDS_TYPE_8: {
             SDS_HDR_VAR(8,s);
-            return sh->alloc - sh->len;
+            return sh->alloc - sh->len;     // 申请的总大小 - 已使用的大小
         }
         case SDS_TYPE_16: {
             SDS_HDR_VAR(16,s);
@@ -126,6 +150,7 @@ static inline size_t sdsavail(const sds s) {
     return 0;
 }
 
+// 更新sds已使用的内存大小, newlen直接替换sdshdr->len
 static inline void sdssetlen(sds s, size_t newlen) {
     unsigned char flags = s[-1];
     switch(flags&SDS_TYPE_MASK) {
@@ -150,6 +175,7 @@ static inline void sdssetlen(sds s, size_t newlen) {
     }
 }
 
+// 对sds已使用的内存大小进行累加
 static inline void sdsinclen(sds s, size_t inc) {
     unsigned char flags = s[-1];
     switch(flags&SDS_TYPE_MASK) {
@@ -176,6 +202,7 @@ static inline void sdsinclen(sds s, size_t inc) {
 }
 
 /* sdsalloc() = sdsavail() + sdslen() */
+// 获取sds的总大小(未使用的大小 + 已使用的大小)
 static inline size_t sdsalloc(const sds s) {
     unsigned char flags = s[-1];
     switch(flags&SDS_TYPE_MASK) {
@@ -193,6 +220,7 @@ static inline size_t sdsalloc(const sds s) {
     return 0;
 }
 
+// 更新sds总共的内存大小, newlen直接替换sdshdr->alloc
 static inline void sdssetalloc(sds s, size_t newlen) {
     unsigned char flags = s[-1];
     switch(flags&SDS_TYPE_MASK) {
