@@ -139,13 +139,20 @@
 #define ZIP_IS_STR(enc) (((enc) & ZIP_STR_MASK) < ZIP_STR_MASK)
 
 /* Utility macros */
+// 可以关联到ziplist的bytes(它表示整个ziplist的大小), 通过强制类型转换, 用来获取整个ziplist所占的空间大小
 #define ZIPLIST_BYTES(zl)       (*((uint32_t*)(zl)))
+// 可以关联到ziplist的tail(它表示从ziplist的开头到最后一个元素的偏移量), 该函数用来获取tail对应的值
 #define ZIPLIST_TAIL_OFFSET(zl) (*((uint32_t*)((zl)+sizeof(uint32_t))))
+// 可以关联到ziplist的len(它的值表示ziplist的元素数量), 该函数用来获取len对应的值
 #define ZIPLIST_LENGTH(zl)      (*((uint16_t*)((zl)+sizeof(uint32_t)*2)))
+// 快速获取ziplist头部的长度(bytes所占的内存大小+tail所占的内存大小+len所占的内存大小)
 #define ZIPLIST_HEADER_SIZE     (sizeof(uint32_t)*2+sizeof(uint16_t))
 #define ZIPLIST_END_SIZE        (sizeof(uint8_t))
+// 快速获取第一个元素(entry)的起始地址
 #define ZIPLIST_ENTRY_HEAD(zl)  ((zl)+ZIPLIST_HEADER_SIZE)
+// 快速获取最后一个元素(entry)的起始地址
 #define ZIPLIST_ENTRY_TAIL(zl)  ((zl)+intrev32ifbe(ZIPLIST_TAIL_OFFSET(zl)))
+// 快速获取整个ziplist元素结束地址(zl起始地址 + bytes表示的大小 - end所占的内存大小)
 #define ZIPLIST_ENTRY_END(zl)   ((zl)+intrev32ifbe(ZIPLIST_BYTES(zl))-1)
 
 /* We know a positive increment can only be 1 because entries can only be
@@ -423,13 +430,24 @@ void zipEntry(unsigned char *p, zlentry *e) {
 }
 
 /* Create a new empty ziplist. */
+// 创建一个ziplist, ziplist的数据结构如下
+// <ziplist bytes><ziplist tail><ziplist len><entry>....<entry><ziplist end>
+// ziplist bytes: 是一个uint32, 表示ziplist占用的总字节数, 包含ziplist bytes的大小
+// ziplist tail: 是一个uint32，表示ziplist最后一个元素(entry)在整个ziplist的偏移量, 主要用来快速找到最后一个元素, 从而进行在尾端pop和push的操作
+// ziplist len: 是一个uint16, 表示ziplist的元素数量,
+//      因为是uint16, 所以可以最多表示2^16 - 1个元素,
+//      当ziplist元素大于2^16 - 1时, 该值将不表示元素数量, 那么获取元素数量就需要遍历整个ziplist
+// entry: 表示ziplist的元素, 它有自己的内部结构
+// ziplist end: 是ziplist结束的标志, 1个字节, 固定值为255（0xFF)
 unsigned char *ziplistNew(void) {
-    unsigned int bytes = ZIPLIST_HEADER_SIZE+1;
-    unsigned char *zl = zmalloc(bytes);
-    ZIPLIST_BYTES(zl) = intrev32ifbe(bytes);
-    ZIPLIST_TAIL_OFFSET(zl) = intrev32ifbe(ZIPLIST_HEADER_SIZE);
-    ZIPLIST_LENGTH(zl) = 0;
-    zl[bytes-1] = ZIP_END;
+    unsigned int bytes = ZIPLIST_HEADER_SIZE+1;     // 获取无元素时ziplist的大小(2*sizeof(uint32) + sizeof(uint16) + 1)
+    unsigned char *zl = zmalloc(bytes);             // 申请内存
+
+    // 初始化ziplist的属性
+    ZIPLIST_BYTES(zl) = intrev32ifbe(bytes);        // 定义ziplist的bytes属性
+    ZIPLIST_TAIL_OFFSET(zl) = intrev32ifbe(ZIPLIST_HEADER_SIZE);    // 定义ziplist的tail属性
+    ZIPLIST_LENGTH(zl) = 0;                         // 定义ziplist的len属性
+    zl[bytes-1] = ZIP_END;                          // 定义ziplist的end属性, 固定值255
     return zl;
 }
 
@@ -583,7 +601,10 @@ unsigned char *__ziplistDelete(unsigned char *zl, unsigned char *p, unsigned int
 }
 
 /* Insert item at "p". */
+// 把长度为slen的数据s, 根据p指向的插入位置, 把数据插入到ziplist zl中
+// p只有两个位置: ziplist zl的第一个元素的地址, ziplist元素末尾地址
 unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned char *s, unsigned int slen) {
+    // curlen表示当前ziplist所占的空间大小(bytes的值)
     size_t curlen = intrev32ifbe(ZIPLIST_BYTES(zl)), reqlen;
     unsigned int prevlensize, prevlen = 0;
     size_t offset;
@@ -595,11 +616,18 @@ unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned cha
     zlentry tail;
 
     /* Find out prevlen for the entry that is inserted. */
+    // 判断插入点是否在end处
     if (p[0] != ZIP_END) {
+        // 如果插入点地址不指向end, 表示该ziplist不是空列表
         ZIP_DECODE_PREVLEN(p, prevlensize, prevlen);
     } else {
-        unsigned char *ptail = ZIPLIST_ENTRY_TAIL(zl);
-        if (ptail[0] != ZIP_END) {
+        // 插入点地址指向end, 这个时候有两种可能性：
+        // 1. ziplist没有元素, 为空列表(这个时候没法判断是头插还是尾插)
+        // 2. ziplist不是空列表, 插入点在ziplist的末尾, 尾插
+        unsigned char *ptail = ZIPLIST_ENTRY_TAIL(zl);  // 获取最后一个元素的起始地址
+        // 如果最后一个元素的起始地址指向end, 则表示ziplist没有元素, 为空
+        // 如果最后一个元素不指向end, 则表示ziplist不是空列表, 那么调整
+        if (ptail[0] != ZIP_END) {      // 列表不为空, 尾插法
             prevlen = zipRawEntryLength(ptail);
         }
     }
@@ -796,8 +824,13 @@ unsigned char *ziplistMerge(unsigned char **first, unsigned char **second) {
     return target;
 }
 
+// 将长度为slen的字符串s，push到ziplist zl中
+// 第四个参数where决定着推入的方向,
+// where = ZIPLIST_HEAD时, 表示插入到ziplist的元素起始位置(第一位)  ---- 头插
+// 否则表示插入到ziplist的末尾                                      ---- 尾插
 unsigned char *ziplistPush(unsigned char *zl, unsigned char *s, unsigned int slen, int where) {
     unsigned char *p;
+    // 根据where的值的不同, 决定插入ziplist的指针是在元素头部还是尾部
     p = (where == ZIPLIST_HEAD) ? ZIPLIST_ENTRY_HEAD(zl) : ZIPLIST_ENTRY_END(zl);
     return __ziplistInsert(zl,p,s,slen);
 }
