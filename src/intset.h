@@ -32,9 +32,13 @@
 #define __INTSET_H
 #include <stdint.h>
 
+// 整数集合结构体
 typedef struct intset {
+    // 编码方式, 表示整数集合中的每个数据元素用几个字节来表示
     uint32_t encoding;
-    uint32_t length;
+    uint32_t length;    // 元素数量
+    // 元素列表(数据存储区, 按照升序排序的数组), 虽然指明元素类型是int8,
+    // 但是数据并不是以这个类型来存储, 而是根据encoding记录的编码方式来存储
     int8_t contents[];
 } intset;
 
