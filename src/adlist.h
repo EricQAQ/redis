@@ -33,27 +33,32 @@
 
 /* Node, List, and Iterator are the only data structures used currently. */
 
+// 双端链表节点结构体
 typedef struct listNode {
-    struct listNode *prev;
-    struct listNode *next;
-    void *value;
+    struct listNode *prev;      // 前置节点
+    struct listNode *next;      // 后置节点
+    void *value;                // 当前节点的值
 } listNode;
 
+// 链表迭代器
 typedef struct listIter {
-    listNode *next;
+    listNode *next;     // 指针, 指向下一个节点
+    // 表示迭代器的遍历方向, 可选值为AL_START_HEAD, AL_START_TAIL
     int direction;
 } listIter;
 
+// 双端链表结构体
 typedef struct list {
-    listNode *head;
-    listNode *tail;
-    void *(*dup)(void *ptr);
-    void (*free)(void *ptr);
-    int (*match)(void *ptr, void *key);
-    unsigned long len;
+    listNode *head;                     // 第一个节点
+    listNode *tail;                     // 最后一个节点
+    void *(*dup)(void *ptr);            // 节点的值的复制函数
+    void (*free)(void *ptr);            // 节点的值的释放函数
+    int (*match)(void *ptr, void *key); // 节点的值的比较函数
+    unsigned long len;                  // 链表长度(节点数量)
 } list;
 
 /* Functions implemented as macros */
+// 一些简单的宏, 为了简化操作
 #define listLength(l) ((l)->len)
 #define listFirst(l) ((l)->head)
 #define listLast(l) ((l)->tail)
