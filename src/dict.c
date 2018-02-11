@@ -33,6 +33,34 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+/* 字典中哈希表的结构如下:
+ *
+ * dictht: **table ------> dictEntry_1  -------> key
+ *         size            dictEntry_2           value
+ *         sizemask        dictEntry_3           next -----> key
+ *         used            dictEntry_4                       value
+ *                          .........                        next -----> key
+ *                                                                       value
+ *                                                                       next -----> ......
+ * dictht: 哈希表对象
+ *      table: 一个哈希表数组指针, 指向的数组的元素是dictEntry,
+ *             每一个dictEntry都是一个链表的头部, 链表的每一个节点都是该字典保存的一个键值对
+ *      size: 哈希表的容量大小
+ *      sizemask: 哈希表大小掩码, 总是等于(size - 1), 用来计算索引
+ *      used: 哈希表已存在的键值对数量
+ *
+ * 由上面的结构可以看出, 哈希表dictht结构体中, table是指向一个元素为dictEntry的数组,
+ * 而每一个dictEntry, 都是一个链表, 每个链表节点都包含着一个键值对.
+ *
+ * rehash中的桶(bucket): 其实就是每个索引对应的一个dictEntry, 它就是rehash的最小单位, 即每次
+ *                       执行一次rehash操作, 最少会迁移一个dictEntry(因为空桶的缘故, 不保证一定会迁移)
+ * rehash中的rehashidx: 其实就是table数组的索引, 值当然就是一个dictEntry了
+ *
+ * 对应关系: rehashidx -------- bucket -------- key
+ *               1     --------    1   --------  n
+ * 一个rehashidx对应一个bucket, 一个bucket对应多个k-v键值对
+ */
+
 #include "fmacros.h"
 
 #include <stdio.h>
@@ -156,6 +184,7 @@ unsigned int dictGenCaseHashFunction(const unsigned char *buf, int len) {
 
 /* Reset a hash table already initialized with ht_init().
  * NOTE: This function should only be called by ht_destroy(). */
+// 初始化哈希表
 static void _dictReset(dictht *ht)
 {
     ht->table = NULL;
@@ -165,24 +194,33 @@ static void _dictReset(dictht *ht)
 }
 
 /* Create a new hash table */
+// 创建一个新字典
 dict *dictCreate(dictType *type,
         void *privDataPtr)
 {
+    // 新建字典对象
     dict *d = zmalloc(sizeof(*d));
 
+    // 初始化字典对象
     _dictInit(d,type,privDataPtr);
     return d;
 }
 
 /* Initialize the hash table */
+// 初始化字典(哈希表)
 int _dictInit(dict *d, dictType *type,
         void *privDataPtr)
 {
+    // 初始化字典的两张哈希表
     _dictReset(&d->ht[0]);
     _dictReset(&d->ht[1]);
+    // 为字典设置特定的函数
     d->type = type;
+    // 设置字典的私有数据
     d->privdata = privDataPtr;
+    // 设置哈希表的rehash状态
     d->rehashidx = -1;
+    // 设置字典的迭代器数量
     d->iterators = 0;
     return DICT_OK;
 }
@@ -242,35 +280,62 @@ int dictExpand(dict *d, unsigned long size)
  * guaranteed that this function will rehash even a single bucket, since it
  * will visit at max N*10 empty buckets in total, otherwise the amount of
  * work it does would be unbound and the function may block for a long time. */
+
+// 执行n次rehash操作, 返回1表示仍然有键需要从旧哈希表移动到新哈希表,
+//                    返回0表示所有键都迁移完毕
+// 每一步rehash操作, 都是以桶为最小单元(即一个哈希表索引), 每个桶里面可能会有多个节点
+// 但是该函数不保证执行完成后一定会从旧哈希表中迁移一个桶到新哈希表, 因为每个哈希表
+// 都会有很多空白的空间(也就是说会有很多空桶), 该函数最多会扫描N*10个空桶, 然后返回.
+// 如果不这样做(即一定要保证迁移一个桶), 可能会导致redis在这个函数阻塞很久
+//
+// 对桶, rehashidx, 以及哈希表不了解的话, 可参照本文件的顶部注释
 int dictRehash(dict *d, int n) {
+    // 设置最大访问的空桶个数
     int empty_visits = n*10; /* Max number of empty buckets to visit. */
+    // 保证rehash操作一定在rehash进行中执行
     if (!dictIsRehashing(d)) return 0;
 
+    // 迁移n次, 每次一个桶
+    // 为了防止rehashidx的溢出问题, 需要确保0号哈希表还有元素
     while(n-- && d->ht[0].used != 0) {
         dictEntry *de, *nextde;
 
         /* Note that rehashidx can't overflow as we are sure there are more
          * elements because ht[0].used != 0 */
+        // 确保rehashidx没有溢出
         assert(d->ht[0].size > (unsigned long)d->rehashidx);
+        // 忽略数组中为空的索引, 找到下一个非空的索引
         while(d->ht[0].table[d->rehashidx] == NULL) {
             d->rehashidx++;
+            // 每访问一个空索引, 就让计数器减一, 当达到最大访问的空桶数量的时候, 直接返回
             if (--empty_visits == 0) return 1;
         }
+        // 执行到这里, 获取到了非空的索引, 那么就可以得到该索引对应的链表的表头节点了(即dictEntry)
         de = d->ht[0].table[d->rehashidx];
         /* Move all the keys in this bucket from the old to the new hash HT */
+        // 将链表中的所有节点迁移到新哈希表(1号哈希表)
         while(de) {
             unsigned int h;
 
+            // 获取下一个节点的指针
             nextde = de->next;
             /* Get the index in the new hash table */
+            // 对本节点的键, 计算新哈希表的哈希值, 获取节点插入的索引位置
             h = dictHashKey(d, de->key) & d->ht[1].sizemask;
+
+            // 将本节点插入新哈希表
             de->next = d->ht[1].table[h];
             d->ht[1].table[h] = de;
+
+            // 更新新旧哈希表的计数器
             d->ht[0].used--;
             d->ht[1].used++;
+            // 循环处理下一个节点
             de = nextde;
         }
+        // 这个桶迁移完毕, 将旧哈希表对应的索引的指针设置为空
         d->ht[0].table[d->rehashidx] = NULL;
+        // 更新rehash索引
         d->rehashidx++;
     }
 
@@ -314,11 +379,19 @@ int dictRehashMilliseconds(dict *d, int ms) {
  * This function is called by common lookup or update operations in the
  * dictionary so that the hash table automatically migrates from H1 to H2
  * while it is actively used. */
+// 在字典不存在迭代器时, 对字典进行rehash操作
+// 当字典存在迭代器时, 不能进行rehash, 因为迭代的时候执行修改操作可能会使字典数据混乱
+//
+// 当每一次执行查找和更新操作的时候, 都会调用这个函数, 在没有迭代器的时候, 会执行一次
+// rehash操作(把一个dictEntry(一个桶)中的所有kv对, 从哈希表0迁移到哈希表1).
+// 它可以让字典在被使用的同时, 进行rehash操作
 static void _dictRehashStep(dict *d) {
     if (d->iterators == 0) dictRehash(d,1);
 }
 
 /* Add an element to the target hash table */
+// 将给定的键值对(key-val)插入字典中.
+// 只有当key不存在的时候, 插入操作才会成功
 int dictAdd(dict *d, void *key, void *val)
 {
     dictEntry *entry = dictAddRaw(d,key);
@@ -343,12 +416,15 @@ int dictAdd(dict *d, void *key, void *val)
  * If key already exists NULL is returned.
  * If key was added, the hash entry is returned to be manipulated by the caller.
  */
+// 将键key插入到字典中
 dictEntry *dictAddRaw(dict *d, void *key)
 {
     int index;
     dictEntry *entry;
     dictht *ht;
 
+    // 判断字典当前是否在rehash,
+    // 如果正在rehash, 就执行一次rehash操作, 迁移一个dictEntry下的所有kv对
     if (dictIsRehashing(d)) _dictRehashStep(d);
 
     /* Get the index of the new element, or -1 if

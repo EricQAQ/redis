@@ -55,29 +55,48 @@ typedef struct dictEntry {
     struct dictEntry *next;
 } dictEntry;
 
+// 字典特定的函数
 typedef struct dictType {
+    // 计算哈希值的函数
     unsigned int (*hashFunction)(const void *key);
+    // 复制键的函数
     void *(*keyDup)(void *privdata, const void *key);
+    // 复制值的函数
     void *(*valDup)(void *privdata, const void *obj);
+    // 比较键的函数
     int (*keyCompare)(void *privdata, const void *key1, const void *key2);
+    // 释放键的函数
     void (*keyDestructor)(void *privdata, void *key);
+    // 释放值的函数
     void (*valDestructor)(void *privdata, void *obj);
 } dictType;
 
 /* This is our hash table structure. Every dictionary has two of this as we
  * implement incremental rehashing, for the old to the new table. */
+// 哈希表结构体
 typedef struct dictht {
+    // 哈希表数组
     dictEntry **table;
+    // 哈希表的大小
     unsigned long size;
+    // 哈希表大小掩码, 用来计算索引, 总是等于size-1
     unsigned long sizemask;
+    // 哈希表已存在的节点的数量
     unsigned long used;
 } dictht;
 
+// 字典结构体
 typedef struct dict {
+    // 字典的特定函数
     dictType *type;
+    // 存储私有数据
     void *privdata;
+    // 哈希表对象, 是真正存储数据的地方, 一个字典有两个哈希表
+    // 一张哈希表存储数据, 另一张哈希表是做rehash操作的时候使用的表
     dictht ht[2];
+    // rehash索引标识符, 当没有进行rehash的时候, 值为-1
     long rehashidx; /* rehashing not in progress if rehashidx == -1 */
+    // 正在运行的迭代器的数量
     int iterators; /* number of iterators currently running */
 } dict;
 
