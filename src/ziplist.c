@@ -1003,6 +1003,7 @@ unsigned char *ziplistIndex(unsigned char *zl, int index) {
  * p is the pointer to the current element
  *
  * The element after 'p' is returned, otherwise NULL if we are at the end. */
+// 返回节点p的下一个节点, 如果没有节点, 返回null
 unsigned char *ziplistNext(unsigned char *zl, unsigned char *p) {
     ((void) zl);
 
@@ -1013,8 +1014,10 @@ unsigned char *ziplistNext(unsigned char *zl, unsigned char *p) {
         return NULL;
     }
 
+    // 指向p的下一个节点
     p += zipRawEntryLength(p);
     if (p[0] == ZIP_END) {
+        // p已经是最后一个节点, 没有下一个节点, 返回null
         return NULL;
     }
 
@@ -1022,20 +1025,26 @@ unsigned char *ziplistNext(unsigned char *zl, unsigned char *p) {
 }
 
 /* Return pointer to previous entry in ziplist. */
+// 返回节点p的前一个节点
 unsigned char *ziplistPrev(unsigned char *zl, unsigned char *p) {
     unsigned int prevlensize, prevlen = 0;
 
     /* Iterating backwards from ZIP_END should return the tail. When "p" is
      * equal to the first element of the list, we're already at the head,
      * and should return NULL. */
+    // 如果p指向ziplist结束标识符, 直接返回ziplist的tail属性
     if (p[0] == ZIP_END) {
         p = ZIPLIST_ENTRY_TAIL(zl);
+        // 如果tail属性也指向结束标识符, 说明ziplist为空, 返回null
         return (p[0] == ZIP_END) ? NULL : p;
     } else if (p == ZIPLIST_ENTRY_HEAD(zl)) {
+        // 如果p指向ziplist的头部, 说明已经没有前置节点了, 返回null
         return NULL;
     } else {
+        // 否则, 说明p有前置节点, 获取前置节点的起始位置
         ZIP_DECODE_PREVLEN(p, prevlensize, prevlen);
         assert(prevlen > 0);
+        // 返回p的前一个节点
         return p-prevlen;
     }
 }
@@ -1044,18 +1053,23 @@ unsigned char *ziplistPrev(unsigned char *zl, unsigned char *p) {
  * on the encoding of the entry. '*sstr' is always set to NULL to be able
  * to find out whether the string pointer or the integer value was set.
  * Return 0 if 'p' points to the end of the ziplist, 1 otherwise. */
+// 获取指针p指向的节点的值, 如果是string, 则把值传入sstr, 长度传入slen,
+// 如果是int, 则把值传入sval
 unsigned int ziplistGet(unsigned char *p, unsigned char **sstr, unsigned int *slen, long long *sval) {
     zlentry entry;
     if (p == NULL || p[0] == ZIP_END) return 0;
     if (sstr) *sstr = NULL;
 
+    // 获取节点p的相关信息, 写入entry中
     zipEntry(p, &entry);
+    // 如果节点p的值是string, 则把字符串存入sstr, 把长度存入slen
     if (ZIP_IS_STR(entry.encoding)) {
         if (sstr) {
             *slen = entry.len;
             *sstr = p+entry.headersize;
         }
     } else {
+        // 如果节点p的值是数字, 则解码该值, 并存入sval
         if (sval) {
             *sval = zipLoadInteger(p+entry.headersize,entry.encoding);
         }
