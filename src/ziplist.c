@@ -485,10 +485,21 @@ int64_t zipLoadInteger(unsigned char *p, unsigned char encoding) {
 }
 
 /* Return a struct with all information about an entry. */
+// 将p指向的节点的信息保存到e中, 包括:
+// headersize: 节点头部大小
+//      1. prevrawlensize 记录前置节点长度消耗的内存
+//      2. lensize 记录本节点encoding消耗的内存
+// p: 节点的信息
 void zipEntry(unsigned char *p, zlentry *e) {
 
+    // 读取本节点记录上一个节点的长度消耗的内存(prevrawlensize)
+    // 记录上一个节点的长度(prevrawlen)
     ZIP_DECODE_PREVLEN(p, e->prevrawlensize, e->prevrawlen);
+    // 读取本节点encoding的内容(encoding)
+    // 读取本节点记录该节点encoding消耗的内存(lensize)
+    // 读取本节点的长度(len)
     ZIP_DECODE_LENGTH(p + e->prevrawlensize, e->encoding, e->lensize, e->len);
+    // 记录本节点的头部的长度(记录上一节点长度消耗的内存+记录本节点encoding消耗的内存)
     e->headersize = e->prevrawlensize + e->lensize;
     e->p = p;
 }
@@ -601,59 +612,82 @@ unsigned char *__ziplistCascadeUpdate(unsigned char *zl, unsigned char *p) {
 }
 
 /* Delete "num" entries, starting at "p". Returns pointer to the ziplist. */
+// 从指针zl指向的ziplist中删除从指针p开始指向的n个节点, num为删除节点个数
 unsigned char *__ziplistDelete(unsigned char *zl, unsigned char *p, unsigned int num) {
     unsigned int i, totlen, deleted = 0;
     size_t offset;
     int nextdiff = 0;
     zlentry first, tail;
 
+    // 把p指向的节点的信息写入first指针中
     zipEntry(p, &first);
+    // 计算需要被删除的节点总共占用的内存大小, 以及需要删除的节点数量
     for (i = 0; p[0] != ZIP_END && i < num; i++) {
+        // 获取节点消耗的内存大小, 作为偏移值, 下一次循环可以跳转到下一个节点
         p += zipRawEntryLength(p);
         deleted++;
     }
+    // 循环结束后, p指向需要被删除的最后一个节点的末尾
 
+    // 获得需要被删除的所有节点占用的内存
     totlen = p-first.p;
     if (totlen > 0) {
         if (p[0] != ZIP_END) {
+            // 需要被删除的最后一个节点后面还有节点
             /* Storing `prevrawlen` in this entry may increase or decrease the
              * number of bytes required compare to the current `prevrawlen`.
              * There always is room to store this, because it was previously
              * stored by an entry that is now being deleted. */
+            // 因为需要被删除的最后一个节点后面还有节点, 并且该节点记录了上一个
+            // 节点消耗的内存大小, 需要重新计算这个节点的header的记录上一个节点大小
+            // 的部分, 获取计算新旧节点长度消耗内存大小的字节差nextdiff
             nextdiff = zipPrevLenByteDiff(p,first.prevrawlen);
+            // 把指针p后退nextdiff个字节, 为新的header腾出空间
             p -= nextdiff;
+            // 将需要删除的第一个节点的前置节点的长度编码到p中(即需要删除的最后一个
+            // 节点后面的第一个节点)
             zipPrevEncodeLength(p,first.prevrawlen);
 
             /* Update offset for tail */
+            // 更新ziplist记录最后一个节点的起始位置, 即tail属性
             ZIPLIST_TAIL_OFFSET(zl) =
                 intrev32ifbe(intrev32ifbe(ZIPLIST_TAIL_OFFSET(zl))-totlen);
 
             /* When the tail contains more than one entry, we need to take
              * "nextdiff" in account as well. Otherwise, a change in the
              * size of prevlen doesn't have an effect on the *tail* offset. */
+            // 把需要删除的最后一个节点的下一个节点的相关信息写入tail
             zipEntry(p, &tail);
+            // 如果需要删除的最后一个节点的后面还有不止一个节点,
+            // 就需要把nextdiff记录的字节数也计算到tail中, 以让tail对齐表尾节点
             if (p[tail.headersize+tail.len] != ZIP_END) {
                 ZIPLIST_TAIL_OFFSET(zl) =
                    intrev32ifbe(intrev32ifbe(ZIPLIST_TAIL_OFFSET(zl))+nextdiff);
             }
 
             /* Move tail to the front of the ziplist */
+            // 从表尾向表头移动数据, 覆盖掉被删除的节点
             memmove(first.p,p,
                 intrev32ifbe(ZIPLIST_BYTES(zl))-(p-zl)-1);
         } else {
             /* The entire tail was deleted. No need to move memory. */
+            // 表示需要删除的节点后面没有其他节点了
             ZIPLIST_TAIL_OFFSET(zl) =
                 intrev32ifbe((first.p-zl)-first.prevrawlen);
         }
 
         /* Resize and update length */
+        // 缩小并更新ziplist的长度
         offset = first.p-zl;
+        // 调整ziplist的长度
         zl = ziplistResize(zl, intrev32ifbe(ZIPLIST_BYTES(zl))-totlen+nextdiff);
         ZIPLIST_INCR_LENGTH(zl,-deleted);
         p = zl+offset;
 
         /* When nextdiff != 0, the raw length of the next entry has changed, so
          * we need to cascade the update throughout the ziplist */
+        // 如果nextdiff不等于零, 则表示被删除的节点的下一个节点的header大小发生了变化,
+        // 可能需要调整后续所有节点的头部的大小, 所以级联更新后续所有节点的结构
         if (nextdiff != 0)
             zl = __ziplistCascadeUpdate(zl,p);
     }
@@ -1037,7 +1071,10 @@ unsigned char *ziplistInsert(unsigned char *zl, unsigned char *p, unsigned char 
 /* Delete a single entry from the ziplist, pointed to by *p.
  * Also update *p in place, to be able to iterate over the
  * ziplist, while deleting entries. */
+// 从ziplist中删除p指向的节点
 unsigned char *ziplistDelete(unsigned char *zl, unsigned char **p) {
+    // 因为删除节点涉及ziplist的内存重新分配, 所以需要计算ziplist起始位置到节点p的偏移量
+    // 用来快速还原后面的节点
     size_t offset = *p-zl;
     zl = __ziplistDelete(zl,*p,1);
 
