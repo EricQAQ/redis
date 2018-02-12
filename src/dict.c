@@ -83,7 +83,20 @@
  * Note that even when dict_can_resize is set to 0, not all resizes are
  * prevented: a hash table is still allowed to grow if the ratio between
  * the number of elements and the buckets > dict_force_resize_ratio. */
+
+// 通过手动调用dictEnableResize()和dictDisableResize()函数, 我们可以启用或者终止
+// 哈希表的rehash操作, 这对redis的性能有很重要的意义. 因为哈希表的rehash操作是使
+// 用copy-on-write的机制进行的, 我们不希望在有更新操作的时候消耗掉太多的内存(因为
+// 在rehash的时候, 字典会有两个哈希表, 0号哈希表是正在使用的表, 1号哈希表是扩容后,
+// 但是数据还没有进行迁移的表, 那么这个时候就会很占用内存)
+//
+// 注意即使我们通过dictDisableResize()函数修改了dict_can_resize为0, 但是不是所有的
+// resize操作都不能进行: 如果已使用节点的数量和字典大小之间的比率,
+//                       大于字典强制 rehash 比率 dict_force_resize_ratio ，
+
+// 标识符, 告诉字典是否可以启用rehash操作
 static int dict_can_resize = 1;
+// 强制进行扩展(rehash)操作的比率
 static unsigned int dict_force_resize_ratio = 5;
 
 /* -------------------------- private prototypes ---------------------------- */
@@ -239,33 +252,53 @@ int dictResize(dict *d)
 }
 
 /* Expand or create the hash table */
+// 扩展或者创建哈希表, 以下情况不会进行扩展操作:
+// 1. 字典正在进行rehash操作
+// 2. 扩容的容量小于等于字典0号哈希表中已经使用的容量
+//
+// - 扩容其实就是根据给予的容量, 重新创建一个新的哈希表, 并把新表赋值给
+//   字典的1号哈希表, 并通过rehashidx=0的方式, 标记该字典正在进行rehash
+//   操作, 需要进行rehash的桶是0号桶
+// - 初始化其实就是根据给予的容量, 重新创建一个新的哈希表, 并把新表赋值
+//   给字典的0号哈希表
 int dictExpand(dict *d, unsigned long size)
 {
     dictht n; /* the new hash table */
+    // 根据size来计算哈希表扩展后的最大容量
     unsigned long realsize = _dictNextPower(size);
 
     /* the size is invalid if it is smaller than the number of
      * elements already inside the hash table */
+    // 不能在rehash的时候进行扩容
+    // 不能在哈希表使用节点大于扩容后的size的时候扩容
     if (dictIsRehashing(d) || d->ht[0].used > size)
         return DICT_ERR;
 
     /* Rehashing to the same table size is not useful. */
+    // 不能在扩容后的容量等于现有容量的时候扩容
     if (realsize == d->ht[0].size) return DICT_ERR;
 
     /* Allocate the new hash table and initialize all pointers to NULL */
+    // 扩容操作
+    // 1. 设置容量, 以及size掩码
     n.size = realsize;
     n.sizemask = realsize-1;
+    // 2. 为哈希数组重新申请空间
     n.table = zcalloc(realsize*sizeof(dictEntry*));
     n.used = 0;
 
     /* Is this the first initialization? If so it's not really a rehashing
      * we just set the first hash table so that it can accept keys. */
+    // 如果0号哈希表没有数据, 那么说明这是0号哈希表在进行初始化
+    // 那么将初始化完成的哈希数组交给0号哈希表就可以了
     if (d->ht[0].table == NULL) {
         d->ht[0] = n;
         return DICT_OK;
     }
 
     /* Prepare a second hash table for incremental rehashing */
+    // 执行到这里, 就说明0号哈希表在进行扩容, 那么就把初始化完成的哈希数组
+    // 交给1号哈希表, 并更新rehashidx索引, 标记为正在进行rehash操作
     d->ht[1] = n;
     d->rehashidx = 0;
     return DICT_OK;
@@ -394,9 +427,12 @@ static void _dictRehashStep(dict *d) {
 // 只有当key不存在的时候, 插入操作才会成功
 int dictAdd(dict *d, void *key, void *val)
 {
+    // 将键插入字典中, 返回值为包含了这个键的新节点
     dictEntry *entry = dictAddRaw(d,key);
 
+    // 如果字典已经有这个键, 则插入失败
     if (!entry) return DICT_ERR;
+    // 给节点更新这个键对应的值, 插入成功
     dictSetVal(d, entry, val);
     return DICT_OK;
 }
@@ -429,6 +465,7 @@ dictEntry *dictAddRaw(dict *d, void *key)
 
     /* Get the index of the new element, or -1 if
      * the element already exists. */
+    // 获得key对应的索引值, 如果key已经存在, 则返回null
     if ((index = _dictKeyIndex(d, key)) == -1)
         return NULL;
 
@@ -436,13 +473,20 @@ dictEntry *dictAddRaw(dict *d, void *key)
      * Insert the element in top, with the assumption that in a database
      * system it is more likely that recently added entries are accessed
      * more frequently. */
+    // 判断字典是否在进行rehash操作, 我们需要知道插入操作是在0号还是1号哈希表中进行
+    // 如果正在进行rehash, 那么就把值插入到1号哈希表中对应的索引位置
+    // 如果没有进行rehash, 那么就把值插入到0号哈希表中对应的索引位置
     ht = dictIsRehashing(d) ? &d->ht[1] : &d->ht[0];
+    // 为新dictEntry申请空间
     entry = zmalloc(sizeof(*entry));
+    // 在对应的索引位置对应的dictEntry链表的头部插入
     entry->next = ht->table[index];
     ht->table[index] = entry;
+    // 更新字典使用量
     ht->used++;
 
     /* Set the hash entry fields. */
+    // 设置新节点的键
     dictSetKey(d, entry, key);
     return entry;
 }
@@ -999,18 +1043,30 @@ unsigned long dictScan(dict *d,
 /* ------------------------- private functions ------------------------------ */
 
 /* Expand the hash table if needed */
+// 判断字典d是否需要扩展或者初始化0号哈希表
+// 字典正在进行rehash操作时, 不扩展
+// 如果0号哈希表容量为0, 则表示该哈希表还没初始化, 进行0号哈希表的初始化
+// 如果达到了哈希表扩展的条件, 那么就扩展0号哈希表, 容量为使用量的两倍
+// 扩展的逻辑就是新创建一个容量为使用量两倍的哈希表, 给字典的1号哈希表,
+// 标记rehash操作, 不需要进行数据迁移(迁移通过copy-on-write机制)
 static int _dictExpandIfNeeded(dict *d)
 {
     /* Incremental rehashing already in progress. Return. */
+    // 当前字典正在进行rehash的操作, 直接返回
     if (dictIsRehashing(d)) return DICT_OK;
 
     /* If the hash table is empty expand it to the initial size. */
+    // 如果字典的0号哈希表为空, 那么就创建并初始化这个0号哈希表
     if (d->ht[0].size == 0) return dictExpand(d, DICT_HT_INITIAL_SIZE);
 
     /* If we reached the 1:1 ratio, and we are allowed to resize the hash
      * table (global setting) or we should avoid it but the ratio between
      * elements/buckets is over the "safe" threshold, we resize doubling
      * the number of buckets. */
+    // 判断字典是否需要扩展, 条件为:
+    // 1. 字典使用的数量 >= 字典的容量
+    // 2. 开启dict_can_resize, 或者 字典使用的数量/字典容量 > 定义的上线比例
+    // 这个时候, 就会开启字典扩展
     if (d->ht[0].used >= d->ht[0].size &&
         (dict_can_resize ||
          d->ht[0].used/d->ht[0].size > dict_force_resize_ratio))
@@ -1021,6 +1077,7 @@ static int _dictExpandIfNeeded(dict *d)
 }
 
 /* Our hash table capability is a power of two */
+// 根据给予的size参数, 计算哈希表的容量, 哈希表最大容量不能大于LONG_MAX
 static unsigned long _dictNextPower(unsigned long size)
 {
     unsigned long i = DICT_HT_INITIAL_SIZE;
@@ -1039,27 +1096,39 @@ static unsigned long _dictNextPower(unsigned long size)
  *
  * Note that if we are in the process of rehashing the hash table, the
  * index is always returned in the context of the second (new) hash table. */
+// 返回key在字典d中可以插入的对应的索引值, 如果key在dict中存在, 则返回-1
+// 如果该字典正在进行rehash操作, 那么返回的索引值一定是1号哈希表的索引值,
+// 因为在rehash的过程中, 插入操作总是在1号哈希表中进行
 static int _dictKeyIndex(dict *d, const void *key)
 {
     unsigned int h, idx, table;
     dictEntry *he;
 
     /* Expand the hash table if needed */
+    // 判断字典是否需要进行扩展操作
     if (_dictExpandIfNeeded(d) == DICT_ERR)
         return -1;
     /* Compute the key hash value */
+    // 计算key的hash值
     h = dictHashKey(d, key);
+    // 遍历两张哈希表来查找key的hash值
     for (table = 0; table <= 1; table++) {
+        // 计算key的索引值
         idx = h & d->ht[table].sizemask;
         /* Search if this slot does not already contain the given key */
+        // 遍历这个索引对应的dictEntry的链表, 查找key是否存在
         he = d->ht[table].table[idx];
         while(he) {
             if (key==he->key || dictCompareKeys(d, key, he->key))
                 return -1;
             he = he->next;
         }
+        // 如果能执行到这里, 就说明key在0号哈希表中不存在,
+        // 如果字典正在进行rehash操作, 那么接着从1号哈希表中找key
+        // 因为在rehash的过程中, 我们要求插入操作总是在1号哈希表中进行
         if (!dictIsRehashing(d)) break;
     }
+    // 返回key对应的索引值
     return idx;
 }
 
