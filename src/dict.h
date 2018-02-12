@@ -104,10 +104,22 @@ typedef struct dict {
  * dictAdd, dictFind, and other functions against the dictionary even while
  * iterating. Otherwise it is a non safe iterator, and only dictNext()
  * should be called while iterating. */
+// 字典迭代器, 分为两种类型:
+// 1. 安全迭代器, safe属性会设置为1. 在安全迭代器下, 可以对字典进行修改操作
+// 2. 不安全迭代器, safe属性会设置为0. 在不安全迭代器下, 如果对字典进行修改,
+//    可能会导致数据的错乱
 typedef struct dictIterator {
+    // 被迭代的字典
     dict *d;
+    // 迭代器当前指向的哈希表的索引
     long index;
+    // table表示正在迭代的哈希表(0号或1号哈希表)
+    // safe: 标识这个迭代器是否是安全的
     int table, safe;
+    // entry: 当前迭代的dictEntry链表的节点
+    // nextEntry: 下一个节点, 因为在安全迭代器中, 当前的entry可能会被修改,
+    //            那么这时就丢失了下一个对象, 所以需要额外的属性来记录下一
+    //            个节点的地址
     dictEntry *entry, *nextEntry;
     /* unsafe iterator fingerprint for misuse detection. */
     long long fingerprint;
@@ -119,6 +131,7 @@ typedef void (dictScanFunction)(void *privdata, const dictEntry *de);
 #define DICT_HT_INITIAL_SIZE     4
 
 /* ------------------------------- Macros ------------------------------------*/
+// 使用dictType提供的释放函数, 释放dictEntry的值
 #define dictFreeVal(d, entry) \
     if ((d)->type->valDestructor) \
         (d)->type->valDestructor((d)->privdata, (entry)->v.val)
@@ -140,6 +153,7 @@ typedef void (dictScanFunction)(void *privdata, const dictEntry *de);
 #define dictSetDoubleVal(entry, _val_) \
     do { entry->v.d = _val_; } while(0)
 
+// 使用dictType提供的释放函数, 释放dictEntry的键
 #define dictFreeKey(d, entry) \
     if ((d)->type->keyDestructor) \
         (d)->type->keyDestructor((d)->privdata, (entry)->key)

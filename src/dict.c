@@ -321,7 +321,7 @@ int dictExpand(dict *d, unsigned long size)
 // 都会有很多空白的空间(也就是说会有很多空桶), 该函数最多会扫描N*10个空桶, 然后返回.
 // 如果不这样做(即一定要保证迁移一个桶), 可能会导致redis在这个函数阻塞很久
 //
-// 对桶, rehashidx, 以及哈希表不了解的话, 可参照本文件的顶部注释
+// 对桶, rehashidx, 以及哈希表不理解的话, 可参照本文件的顶部注释
 int dictRehash(dict *d, int n) {
     // 设置最大访问的空桶个数
     int empty_visits = n*10; /* Max number of empty buckets to visit. */
@@ -373,10 +373,17 @@ int dictRehash(dict *d, int n) {
     }
 
     /* Check if we already rehashed the whole table... */
+    // 检查0号哈希表的数据是否都已经迁移到1号哈希表中
     if (d->ht[0].used == 0) {
+        // 如果迁移完毕, 执行以下操作:
+        // 1. 释放0号哈希表的table属性
         zfree(d->ht[0].table);
+        // 2. 把迁移完成的1号哈希表交给0号哈希表
+        //    因为正常使用时, 都是用0号哈希表, 1号哈希表存在的意义是无阻塞地进行rehash
         d->ht[0] = d->ht[1];
+        // 重新初始化1号哈希表
         _dictReset(&d->ht[1]);
+        // 设置字典不处在rehash的状态
         d->rehashidx = -1;
         return 0;
     }
@@ -453,6 +460,9 @@ int dictAdd(dict *d, void *key, void *val)
  * If key was added, the hash entry is returned to be manipulated by the caller.
  */
 // 将键key插入到字典中
+// 如果键已经存在, 则返回null,
+// 如果键不存在, 则找到键对应的哈希索引值, 创建一个dictEntry, key为当前键, 并插入对应
+// 索引的链表头部, 然后返回这个dictEntry
 dictEntry *dictAddRaw(dict *d, void *key)
 {
     int index;
@@ -529,47 +539,72 @@ dictEntry *dictReplaceRaw(dict *d, void *key) {
 }
 
 /* Search and remove an element */
+// 从字典d中查找键是否存在,
+// 如果不存在则删除失败, 如果存在, 则从对应链表中删除该键对应的节点
+// nofree参数用来判断是否需要调用dictType提供的释放函数来释放该节点的键和值,
+// 0表示调用, 1表示不调用
 static int dictGenericDelete(dict *d, const void *key, int nofree)
 {
     unsigned int h, idx;
     dictEntry *he, *prevHe;
     int table;
 
+    // 字典哈希表为空, 直接返回删除失败
     if (d->ht[0].size == 0) return DICT_ERR; /* d->ht[0].table is NULL */
+    // 如果字典正在进行rehash, 进行一次rehash操作
     if (dictIsRehashing(d)) _dictRehashStep(d);
+    // 计算key的哈希值
     h = dictHashKey(d, key);
 
+    // 遍历两张哈希表, 优先从0号哈希表找, 如果找不到, 再从1号表找
+    // (1号哈希表是在rehash的时候才会起用)
     for (table = 0; table <= 1; table++) {
+        // 根据哈希值计算key对应的索引
         idx = h & d->ht[table].sizemask;
+        // 找到key对应的dictEntry链表头部
         he = d->ht[table].table[idx];
         prevHe = NULL;
+        // 遍历链表, 查找key是否存在
         while(he) {
+            // 把当前节点的key属性和提供的key做比较
             if (key==he->key || dictCompareKeys(d, key, he->key)) {
                 /* Unlink the element from the list */
+                // 如果key存在, 从链表中删除这个节点
                 if (prevHe)
                     prevHe->next = he->next;
                 else
                     d->ht[table].table[idx] = he->next;
+                // 根据nofree参数来判断是否需要释放节点的键和值
                 if (!nofree) {
+                    // 释放这个dictEntry节点的键
                     dictFreeKey(d, he);
+                    // 释放这个dictEntry节点的值
                     dictFreeVal(d, he);
                 }
+                // 释放节点的内存空间
                 zfree(he);
+                // 更新字典的已使用大小
                 d->ht[table].used--;
                 return DICT_OK;
             }
             prevHe = he;
             he = he->next;
         }
+        // 如果字典正在进行rehash操作, 才继续从1号哈希表查找, 否则直接返回
         if (!dictIsRehashing(d)) break;
     }
+    // 没有找到key, 删除失败
     return DICT_ERR; /* not found */
 }
 
+// 在字典中删除给定键key的节点, 使用释放函数来释放节点中键和值占用的空间
+// 返回是否删除成功
 int dictDelete(dict *ht, const void *key) {
     return dictGenericDelete(ht,key,0);
 }
 
+// 在字典中删除给定键key的节点, 不使用释放函数来释放节点中键和值占用的空间
+// 返回是否删除成功
 int dictDeleteNoFree(dict *ht, const void *key) {
     return dictGenericDelete(ht,key,1);
 }
@@ -609,23 +644,35 @@ void dictRelease(dict *d)
     zfree(d);
 }
 
+// 在字典d中查找键key对应的节点,
+// 如果节点存在, 则返回, 如果节点不存在, 则返回null
 dictEntry *dictFind(dict *d, const void *key)
 {
     dictEntry *he;
     unsigned int h, idx, table;
 
+    // 字典的哈希表为空
     if (d->ht[0].used + d->ht[1].used == 0) return NULL; /* dict is empty */
+    // 如果字典正在执行rehash操作, 执行一次rehash
     if (dictIsRehashing(d)) _dictRehashStep(d);
+    // 计算key的哈希值
     h = dictHashKey(d, key);
+    // 遍历哈希表查找key
     for (table = 0; table <= 1; table++) {
+        // 根据key的哈希值算出key对应的索引值
         idx = h & d->ht[table].sizemask;
+        // 找到对应的dictEntry链表头部
         he = d->ht[table].table[idx];
+        // 遍历这个链表, 找key
         while(he) {
             if (key==he->key || dictCompareKeys(d, key, he->key))
+                // 找到key对应的节点, 返回
                 return he;
             he = he->next;
         }
+        // 如果dict不在进行rehash操作, 不用在1号哈希表查找, 直接返回
         if (!dictIsRehashing(d)) return NULL;
+        // 否则从1号哈希表中循环查找
     }
     return NULL;
 }
@@ -675,6 +722,7 @@ long long dictFingerprint(dict *d) {
     return hash;
 }
 
+// 创建并返回字典d的不安全的迭代器
 dictIterator *dictGetIterator(dict *d)
 {
     dictIterator *iter = zmalloc(sizeof(*iter));
@@ -682,12 +730,13 @@ dictIterator *dictGetIterator(dict *d)
     iter->d = d;
     iter->table = 0;
     iter->index = -1;
-    iter->safe = 0;
+    iter->safe = 0;     // 不安全迭代器
     iter->entry = NULL;
     iter->nextEntry = NULL;
     return iter;
 }
 
+// 创建并返回字典d的安全迭代器
 dictIterator *dictGetSafeIterator(dict *d) {
     dictIterator *i = dictGetIterator(d);
 
@@ -695,35 +744,65 @@ dictIterator *dictGetSafeIterator(dict *d) {
     return i;
 }
 
+// 返回迭代器当前指向的节点
+// 迭代的顺序是这样的:
+// 1. 先开始从0号哈希表开始迭代
+//      1.1 从0号哈希表的0号索引开始迭代 <━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+//          1.1.1 从0号哈希表的0号索引对应的dictEntry链表开始迭代    ┃
+//              1.1.1.1 依次迭代整个链表, 当当前链表迭代完成后 ━━━━━━┛
+// 2. 如果字典处于rehash状态, 当0号哈希表迭代完成后, 迭代1号哈希表
 dictEntry *dictNext(dictIterator *iter)
 {
     while (1) {
         if (iter->entry == NULL) {
+            // 执行到这里, 有两种可能:
+            // 1. 迭代器还没有被调用过, 也就是第一次调用
+            // 2. 迭代器已经完整迭代了一个索引对应的dictEntry链表,
+            //    需要迭代下一个索引
+
+            // 指向需要被迭代的哈希表
             dictht *ht = &iter->d->ht[iter->table];
+            // 第一次迭代执行
             if (iter->index == -1 && iter->table == 0) {
+                // 如果是安全迭代器, 那么字典的安全迭代器计数器
                 if (iter->safe)
                     iter->d->iterators++;
+                // 不是安全迭代器, 计算指纹
                 else
                     iter->fingerprint = dictFingerprint(iter->d);
             }
+            // 更新索引值
             iter->index++;
+            // 判断是否迭代完毕
             if (iter->index >= (long) ht->size) {
+                // 迭代完毕, 如果字典正在进行rehash操作, 并且正在迭代0号哈希表,
+                // 那么也需要迭代1号迭代器
                 if (dictIsRehashing(iter->d) && iter->table == 0) {
+                    // 修改需要被迭代的哈希表(0 -> 1)
                     iter->table++;
+                    // 0号哈希表迭代完毕, 需要重置索引来迭代1号哈希表
                     iter->index = 0;
+                    // 指向需要迭代的1号哈希表
                     ht = &iter->d->ht[1];
                 } else {
+                    // 迭代完毕, 跳出循环
                     break;
                 }
             }
+            // 哈希表并未迭代完成, 更新节点指针,
+            // 指向索引对应的dictEntry链表头部
             iter->entry = ht->table[iter->index];
         } else {
+            // 没有执行上面的if语句, 说明该迭代器正在迭代某个dictEntry链表
+            // 将节点指针指向下一个节点
             iter->entry = iter->nextEntry;
         }
+        // 如果节点存在, 那么需要记录该节点的下一个节点指针
         if (iter->entry) {
             /* We need to save the 'next' here, the iterator user
              * may delete the entry we are returning. */
             iter->nextEntry = iter->entry->next;
+            // 返回迭代器当前指向的节点
             return iter->entry;
         }
     }
