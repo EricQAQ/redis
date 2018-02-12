@@ -636,23 +636,39 @@ struct sharedObjectsStruct {
 };
 
 /* ZSETs use a specialized version of Skiplists */
+// 跳跃表节点
 typedef struct zskiplistNode {
+    // 成员对象, 真正的数据存在这里
     robj *obj;
+    // 分值
     double score;
+    // 后退指针, 只有第一层链表的后退指针会指向前一个节点, 是一个双向链表,
+	// 上层的后退指针都指向null
     struct zskiplistNode *backward;
+    // 节点的层级列表
     struct zskiplistLevel {
+        // 某一层的前进指针
         struct zskiplistNode *forward;
+        // 某一层的跨度
         unsigned int span;
-    } level[];
+    } level[];      // 每个节点的层级列表, 最大可以有32层, 由ZSKIPLIST_MAXLEVEL定义
 } zskiplistNode;
 
+// 跳跃表头部
 typedef struct zskiplist {
+    // 跳跃表头部节点和尾部节点
     struct zskiplistNode *header, *tail;
+    // 跳跃表中的节点数量
     unsigned long length;
+    // 跳跃表中最大的层数
     int level;
 } zskiplist;
 
+// 有序集合(sortedset)结构体
 typedef struct zset {
+    // 有序集合包含:
+    // 1. 一个字典, 键为成员, 值为分值, 用来快速地根据成员获取分值
+    // 2. 一个跳跃表, 根据分值对成员进行排序, 用来在O(logN)的复杂度下按分值定位成员
     dict *dict;
     zskiplist *zsl;
 } zset;

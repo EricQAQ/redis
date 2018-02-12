@@ -466,6 +466,9 @@ robj *getDecodedObject(robj *o) {
 #define REDIS_COMPARE_BINARY (1<<0)
 #define REDIS_COMPARE_COLL (1<<1)
 
+// 根据flags的值, 决定使用strcmp()或者strcoll()函数来比较字符串对象
+// 因为对象可能实际上使用整数来保存, 这种情况我们需要使用ll2string()函数把整数
+// 转换成字符串, 再比较字符串
 int compareStringObjectsWithFlags(robj *a, robj *b, int flags) {
     serverAssertWithInfo(NULL,a,a->type == OBJ_STRING && b->type == OBJ_STRING);
     char bufa[128], bufb[128], *astr, *bstr;

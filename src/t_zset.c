@@ -49,32 +49,69 @@
  * pointers being only at "level 1". This allows to traverse the list
  * from tail to head, useful for ZREVRANGE. */
 
+/*
+ * 跳跃表(skiplist)是链表(linked list)的一个强化版, 它加快了搜索对应节点的速度,
+ * 平均情况下时间复杂度为O(logN), 最坏情况是O(N^2)
+ * 跳跃表通过类似叠加链表的方式(层的概念), 来加快节点的搜索, 一个跳跃表构成如下:
+ *
+ *               level_5  --------------------------------------------------------------->  ┏━━━━━┓
+ *               level_4  ------------------------------------------------>  level_4 ---->  ┃     ┃
+ *               level_3  ------------------------------------------------>  level_3 ---->  ┃ NULL┃
+ *               level_2  ------------------->  level_2 ------------------>  level_2 ---->  ┃     ┃
+ * 跳跃表表头    level_1  ---->  level_1 ---->  level_1 ------------------>  level_1 ---->  ┃     ┃
+ * header ----->  obj_1   <--->   obj_2  <--->   obj_3  <--->  obj_4  <--->   obj_5  ---->  ┗━━━━━┛
+ *                                                                              ∧
+ * tail   ----------------------------------------------------------------------┛
+ *
+ * 跳跃表加速的方式显而易见: 因为节点是有序的, 查询一个值的时候, 从表头的最高层到最底层,
+ * 依次找forward指针指向的下一个节点, 并比较值, 最后会找到和提供的值相等的节点, 或者插入点.
+ *
+ * 每个节点的层数是随机的, 在redis中, 节点的层数介于[1, 32]之间(头节点有32层), 层数的产生依赖
+ * 随机数生成, 生成越高的层数, 概率越小.
+ *
+ * 可以看出, 跳跃表第一层是一个双向链表(通过节点的forward和backward指针维持)
+ * 但是上层只是一个单项链表, 上面所有level的backward都指向了null
+ */
+
 #include "server.h"
 #include <math.h>
 
 static int zslLexValueGteMin(robj *value, zlexrangespec *spec);
 static int zslLexValueLteMax(robj *value, zlexrangespec *spec);
 
+// 创建一个层数为level的跳跃表节点, 该节点的分值设为score, 存储内容为obj
 zskiplistNode *zslCreateNode(int level, double score, robj *obj) {
+    // 为节点分配空间
     zskiplistNode *zn = zmalloc(sizeof(*zn)+level*sizeof(struct zskiplistLevel));
+    // 设置节点分值
     zn->score = score;
+    // 设置节点存储内容
     zn->obj = obj;
     return zn;
 }
 
+// 创建一个跳跃表
 zskiplist *zslCreate(void) {
     int j;
     zskiplist *zsl;
 
+    // 为跳跃表分配内存空间
     zsl = zmalloc(sizeof(*zsl));
+    // 初始化跳跃表
     zsl->level = 1;
     zsl->length = 0;
+    // 初始化跳跃表表头节点, 表头节点的层数为32层
     zsl->header = zslCreateNode(ZSKIPLIST_MAXLEVEL,0,NULL);
+    // 遍历该表头节点的所有层数, 因为还没有后续节点, 全部指向null
     for (j = 0; j < ZSKIPLIST_MAXLEVEL; j++) {
+        // 设置第j层的下一个节点
         zsl->header->level[j].forward = NULL;
+        // 设置第j层的跨度
         zsl->header->level[j].span = 0;
     }
+    // 设置回退指针
     zsl->header->backward = NULL;
+    // 设置跳跃表表尾
     zsl->tail = NULL;
     return zsl;
 }
@@ -100,6 +137,8 @@ void zslFree(zskiplist *zsl) {
  * The return value of this function is between 1 and ZSKIPLIST_MAXLEVEL
  * (both inclusive), with a powerlaw-alike distribution where higher
  * levels are less likely to be returned. */
+// 返回一个随机数, 当做跳跃表的新节点的层数
+// 返回值在[1, 32]之间, 越大的值生成的几率越小
 int zslRandomLevel(void) {
     int level = 1;
     while ((random()&0xFFFF) < (ZSKIPLIST_P * 0xFFFF))
@@ -107,58 +146,90 @@ int zslRandomLevel(void) {
     return (level<ZSKIPLIST_MAXLEVEL) ? level : ZSKIPLIST_MAXLEVEL;
 }
 
+// 创建一个成员为obj, 分值为score的节点, 并将整个节点插入跳跃表zsl中
 zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
     zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x;
     unsigned int rank[ZSKIPLIST_MAXLEVEL];
     int i, level;
 
+    // 确保分值合法
     serverAssert(!isnan(score));
+    // 获取跳跃表的头部节点
     x = zsl->header;
+    // 在各个层中查找节点应该插入的位置
     for (i = zsl->level-1; i >= 0; i--) {
         /* store rank that is crossed to reach the insert position */
+		// 如果i是最高一层, 则最高层的rank值为0
+		// 如果i不是最高一层, 则该层起始的rank值为上一层的rank值
+		// 最后rank[0](即第一层)的值+1就是新节点的前置节点的位置(即插入点)
         rank[i] = i == (zsl->level-1) ? 0 : rank[i+1];
+        // 沿着节点第i层的前进指针遍历跳跃表
         while (x->level[i].forward &&
             (x->level[i].forward->score < score ||
                 (x->level[i].forward->score == score &&
+                // 当分值相等时, 对比成员
                 compareStringObjects(x->level[i].forward->obj,obj) < 0))) {
+			// 更新该层的rank值, 记录跨越了多少个节点
             rank[i] += x->level[i].span;
+			// 移动到下一个指针
             x = x->level[i].forward;
         }
+		// 执行到这, 说明第i层中分值小于或等于score的节点已经全部扫描完毕,
+		// 并且更新了这一层的跨度
+		// 因为每层只会有一个节点和新节点相连接(新节点本层的下一个节点)
+		// 所以也需要记录在新节点插入时, 将要和新节点连接的点
         update[i] = x;
     }
     /* we assume the key is not already inside, since we allow duplicated
      * scores, and the re-insertion of score and redis object should never
      * happen since the caller of zslInsert() should test in the hash table
      * if the element is already inside or not. */
+	// 获取新节点的层数, 是一个随机数
     level = zslRandomLevel();
+	// 如果新节点的层数大于跳跃表当前的最大层数
+	// 则先初始化跳跃表表头节点中没有使用的层, 并将它们记录到update数组中
     if (level > zsl->level) {
+		// 初始化没有使用的层(跳跃表当前最大层数~level)
         for (i = zsl->level; i < level; i++) {
             rank[i] = 0;
             update[i] = zsl->header;
             update[i]->level[i].span = zsl->length;
         }
+		// 更新跳跃表当前的最大层数
         zsl->level = level;
     }
+	// 创建新节点
     x = zslCreateNode(level,score,obj);
+	// 根据新节点的层数, 依次对每层进行赋值
     for (i = 0; i < level; i++) {
+		// 设置新节点第i层的forward指针, 值为update数组对应层数的值
         x->level[i].forward = update[i]->level[i].forward;
+		// 将之前记录的update数组对应层数的节点的forward指针指向新节点
         update[i]->level[i].forward = x;
 
         /* update span covered by update[i] as x is inserted here */
+		// 更新新节点第i层的跨度(跨越节点数量)
         x->level[i].span = update[i]->level[i].span - (rank[0] - rank[i]);
+		// 在新节点插入后, 沿途节点的跨度也需要更新
         update[i]->level[i].span = (rank[0] - rank[i]) + 1;
     }
 
     /* increment span for untouched levels */
+	// 还未使用的层数的跨度值也需要加一, 这些节点直接从表头节点指向新节点
     for (i = level; i < zsl->level; i++) {
         update[i]->level[i].span++;
     }
 
+	// 设置新节点的后退指针
     x->backward = (update[0] == zsl->header) ? NULL : update[0];
+	// 如果新节点的第1层有下一个节点, 那么就让下一个节点的后退指针指向这个新节点
+	// 这样就可以在第1层构建出一个双向链表
     if (x->level[0].forward)
         x->level[0].forward->backward = x;
+	// 否则说明新节点是最后一个节点, 让跳跃表的末尾指针指向本节点
     else
         zsl->tail = x;
+	// 更新跳跃表的节点计数器
     zsl->length++;
     return x;
 }
