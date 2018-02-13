@@ -1292,8 +1292,12 @@ unsigned long aofRewriteBufferSize(void);
 /* Sorted sets data type */
 
 /* Struct to hold a inclusive/exclusive range spec by score comparison. */
+// 表示范围的结构体
 typedef struct {
+    // min: 最小值, max: 最大值
     double min, max;
+    // 表示最小值和最大值是否不包含在范围内
+    // 1表示不包含, 0表示包含
     int minex, maxex; /* are min or max exclusive? */
 } zrangespec;
 
