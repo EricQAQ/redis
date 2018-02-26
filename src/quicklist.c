@@ -28,6 +28,25 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+/*
+ * quicklist是redis中List类型的底层实现. 在3.2版本之前, List类型是依赖ziplist和linklist来
+ * 实现的(当元素比较少的时候, 使用ziplist, 元素较多, 会使用linklist), 但是原先的方式有比较
+ * 明显的缺点:
+ *  1. ziplist需要占用一块完整的内存块,
+ *      优点: 里面的元素都是连续的, 存储效率很高, 它能快速的访问到需要的节点
+ *      缺点:
+ *          - 修改元素比较麻烦, 每次数据的变动都会引发内存的realloc,
+ *          - 当ziplist很长的时候, 一次realloc会导致大量的数据拷贝, 性能下降很快
+ *  2. linklist分散了存储, 不是使用一整块内存,
+ *      优点: 在双向链表的两端插入节点和删除节点速度非常快
+ *      缺点:
+ *          - 内存开销很大, 每个节点除了需要存储数据, 还需要存储两个指针, 分别指向上一个节点和下一个节点
+ *          - 因为每个节点都是单独的内存块, 节点过多很容易产生内存碎片
+ *
+ * 所以根据上面的两种数据类型的优缺点, 产生了quicklist这种新的数据结构:
+ *  它的本质是一个ziplist的双向链表(一个linklist, 但是每个节点都是一个ziplist).
+ */
+
 #include <string.h> /* for memcpy */
 #include "quicklist.h"
 #include "zmalloc.h"

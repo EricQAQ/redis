@@ -70,7 +70,7 @@
  * 随机数生成, 生成越高的层数, 概率越小.
  *
  * 可以看出, 跳跃表第一层是一个双向链表(通过节点的forward和backward指针维持)
- * 但是上层只是一个单项链表, 上面所有level的backward都指向了null
+ * 但是上层只是一个单向链表, 上面所有level的backward都指向了null
  */
 
 #include "server.h"
