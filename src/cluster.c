@@ -394,9 +394,11 @@ int clusterLockConfig(char *filename) {
     return C_OK;
 }
 
+// 初始化集群配置
 void clusterInit(void) {
     int saveconf = 0;
 
+    // 初始化配置
     server.cluster = zmalloc(sizeof(clusterState));
     server.cluster->myself = NULL;
     server.cluster->currentEpoch = 0;
@@ -419,13 +421,16 @@ void clusterInit(void) {
 
     /* Lock the cluster config file to make sure every node uses
      * its own nodes.conf. */
+    // 锁定server节点的cluster配置文件, 确保每个redis节点都使用自己的nodes.conf
     if (clusterLockConfig(server.cluster_configfile) == C_ERR)
         exit(1);
 
     /* Load or create a new nodes configuration. */
+    // 加载或者创建一个新节点的配置文件
     if (clusterLoadConfig(server.cluster_configfile) == C_ERR) {
         /* No configuration found. We will just use the random name provided
          * by the createClusterNode() function. */
+        // 执行到这里, 说明没有找到配置文件, 那么就创建一个配置文件
         myself = server.cluster->myself =
             createClusterNode(NULL,CLUSTER_NODE_MYSELF|CLUSTER_NODE_MASTER);
         serverLog(LL_NOTICE,"No cluster configuration found, I'm %.40s",
@@ -433,14 +438,18 @@ void clusterInit(void) {
         clusterAddNode(myself);
         saveconf = 1;
     }
+    // 如果创建了配置, 就保存nodes.conf文件
     if (saveconf) clusterSaveConfigOrDie(1);
 
     /* We need a listening TCP port for our cluster messaging needs. */
+    // 监听tcp端口
     server.cfd_count = 0;
 
     /* Port sanity check II
      * The other handshake port check is triggered too late to stop
      * us from trying to use a too-high cluster port number. */
+    // 判断这个节点开启监听的tcp端口是否合法
+    // 因为集群节点需要开启的端口号是(现有的tcp端口 + 10000)
     if (server.port > (65535-CLUSTER_PORT_INCR)) {
         serverLog(LL_WARNING, "Redis port number too high. "
                    "Cluster communication port is 10,000 port "
@@ -450,6 +459,7 @@ void clusterInit(void) {
         exit(1);
     }
 
+    // 监听一个tcp端口, 用于做集群节点之间的信息同步
     if (listenToPort(server.port+CLUSTER_PORT_INCR,
         server.cfd,&server.cfd_count) == C_ERR)
     {
@@ -457,6 +467,7 @@ void clusterInit(void) {
     } else {
         int j;
 
+        // 为这个tcp端口, 增加接受请求的读事件循环
         for (j = 0; j < server.cfd_count; j++) {
             if (aeCreateFileEvent(server.el, server.cfd[j], AE_READABLE,
                 clusterAcceptHandler, NULL) == AE_ERR)
@@ -466,6 +477,7 @@ void clusterInit(void) {
     }
 
     /* The slots -> keys map is a sorted set. Init it. */
+    // 创建 slots -> keys 的映射, 这个映射是一个有序集合
     server.cluster->slots_to_keys = zslCreate();
 
     /* Set myself->port to my listening port, we'll just need to discover
@@ -3588,6 +3600,7 @@ void clusterUpdateState(void) {
  * The function also uses the logging facility in order to warn the user
  * about desynchronizations between the data we have in memory and the
  * cluster configuration. */
+// 这个函数在节点启动的时候调用, 作用是检验当前节点的节点配置是否正确
 int verifyClusterConfigWithData(void) {
     int j;
     int update_config = 0;

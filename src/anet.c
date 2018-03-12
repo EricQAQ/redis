@@ -58,6 +58,7 @@ static void anetSetError(char *err, const char *fmt, ...)
     va_end(ap);
 }
 
+// 根据non_block参数, 设置文件描述符fd是否阻塞
 int anetSetBlock(char *err, int fd, int non_block) {
     int flags;
 
@@ -235,6 +236,7 @@ int anetResolveIP(char *err, char *host, char *ipbuf, size_t ipbuf_len) {
     return anetGenericResolve(err,host,ipbuf,ipbuf_len,ANET_IP_ONLY);
 }
 
+// 设置socket端口重用
 static int anetSetReuseAddr(char *err, int fd) {
     int yes = 1;
     /* Make sure connection-intensive things like the redis benckmark
@@ -435,6 +437,7 @@ int anetWrite(int fd, char *buf, int count)
     return totlen;
 }
 
+// 绑定并监听端口
 static int anetListen(char *err, int s, struct sockaddr *sa, socklen_t len, int backlog) {
     if (bind(s,sa,len) == -1) {
         anetSetError(err, "bind: %s", strerror(errno));
@@ -468,20 +471,25 @@ static int _anetTcpServer(char *err, int port, char *bindaddr, int af, int backl
 
     snprintf(_port,6,"%d",port);
     memset(&hints,0,sizeof(hints));
-    hints.ai_family = af;
-    hints.ai_socktype = SOCK_STREAM;
+    // 设置地址的相关配置
+    hints.ai_family = af;   // 指定ipv4或者ipv6
+    hints.ai_socktype = SOCK_STREAM;    // 指定为tcp socket
     hints.ai_flags = AI_PASSIVE;    /* No effect if bindaddr != NULL */
 
+    // 把解析后的addrinfo放到servinfo里面
     if ((rv = getaddrinfo(bindaddr,_port,&hints,&servinfo)) != 0) {
         anetSetError(err, "%s", gai_strerror(rv));
         return ANET_ERR;
     }
     for (p = servinfo; p != NULL; p = p->ai_next) {
+        // 创建socket
         if ((s = socket(p->ai_family,p->ai_socktype,p->ai_protocol)) == -1)
             continue;
 
         if (af == AF_INET6 && anetV6Only(err,s) == ANET_ERR) goto error;
+        // 设置端口重用
         if (anetSetReuseAddr(err,s) == ANET_ERR) goto error;
+        // 绑定并监听端口
         if (anetListen(err,s,p->ai_addr,p->ai_addrlen,backlog) == ANET_ERR) goto error;
         goto end;
     }
@@ -494,6 +502,7 @@ error:
     if (s != -1) close(s);
     s = ANET_ERR;
 end:
+    // 释放servinfo的内存空间
     freeaddrinfo(servinfo);
     return s;
 }
@@ -503,6 +512,7 @@ int anetTcpServer(char *err, int port, char *bindaddr, int backlog)
     return _anetTcpServer(err, port, bindaddr, AF_INET, backlog);
 }
 
+// 创建ipv6的tcp server
 int anetTcp6Server(char *err, int port, char *bindaddr, int backlog)
 {
     return _anetTcpServer(err, port, bindaddr, AF_INET6, backlog);

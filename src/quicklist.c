@@ -1485,12 +1485,13 @@ int quicklistPopCustom(quicklist *quicklist, int where, unsigned char **data,
 }
 
 /* Return a malloc'd copy of data passed in */
+// 当从quicklist中pop元素, 并且这个不是数字的时候, 使用这个函数来存储pop出来的数据
 REDIS_STATIC void *_quicklistSaver(unsigned char *data, unsigned int sz) {
     unsigned char *vstr;
     if (data) {
-        vstr = zmalloc(sz);
-        memcpy(vstr, data, sz);
-        return vstr;
+        vstr = zmalloc(sz);     // 申请sz大小的内存, 用来存储数据
+        memcpy(vstr, data, sz); // 内存拷贝
+        return vstr;        // 返回指针
     }
     return NULL;
 }

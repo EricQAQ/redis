@@ -68,6 +68,7 @@ double R_Zero, R_PosInf, R_NegInf, R_Nan;
 /*================================= Globals ================================= */
 
 /* Global vars */
+// 全局变量, 用来表示redis server
 struct redisServer server; /* server global state */
 
 /* Our command table.
@@ -1096,6 +1097,19 @@ void updateCachedTime(void) {
  * a macro is used: run_with_period(milliseconds) { .... }
  */
 
+// 这是redis的时间中断器, 每秒调用的次数是server.hz次
+// 下面是需要异步执行的任务:
+// - 主动清除过期的key(过期的key也会被动清除)
+// - 更新软件watchdog的信息
+// - 更新统计信息
+// - 对数据库进行一次rehash操作
+// - 触发bgsave/aof重写操作, 并管理有bgsave和aof重写引发的子进程的终止
+// - 处理各种客户端超时
+// - 复制重连
+//
+// 因为serverCron函数里面的所有代码每秒都会调用server.hz次, 所有为了控制对部分
+// 代码的调用次数, 使用了一个宏: run_with_period, 它可以将被包含代码的执行次数
+// 降低为每个millisecond执行一次
 int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     int j;
     UNUSED(eventLoop);
@@ -1365,9 +1379,11 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
 
 /* =========================== Server initialization ======================== */
 
+// 创建server所需要的共享对象
 void createSharedObjects(void) {
     int j;
 
+    // 常用的response
     shared.crlf = createObject(OBJ_STRING,sdsnew("\r\n"));
     shared.ok = createObject(OBJ_STRING,sdsnew("+OK\r\n"));
     shared.err = createObject(OBJ_STRING,sdsnew("-ERR\r\n"));
@@ -1381,6 +1397,7 @@ void createSharedObjects(void) {
     shared.pong = createObject(OBJ_STRING,sdsnew("+PONG\r\n"));
     shared.queued = createObject(OBJ_STRING,sdsnew("+QUEUED\r\n"));
     shared.emptyscan = createObject(OBJ_STRING,sdsnew("*2\r\n$1\r\n0\r\n*0\r\n"));
+    // 常用的error response
     shared.wrongtypeerr = createObject(OBJ_STRING,sdsnew(
         "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"));
     shared.nokeyerr = createObject(OBJ_STRING,sdsnew(
@@ -1413,10 +1430,12 @@ void createSharedObjects(void) {
         "-NOREPLICAS Not enough good slaves to write.\r\n"));
     shared.busykeyerr = createObject(OBJ_STRING,sdsnew(
         "-BUSYKEY Target key name already exists.\r\n"));
+    // 常用的字符
     shared.space = createObject(OBJ_STRING,sdsnew(" "));
     shared.colon = createObject(OBJ_STRING,sdsnew(":"));
     shared.plus = createObject(OBJ_STRING,sdsnew("+"));
 
+    // 常用的select命令
     for (j = 0; j < PROTO_SHARED_SELECT_CMDS; j++) {
         char dictid_str[64];
         int dictid_len;
@@ -1427,20 +1446,24 @@ void createSharedObjects(void) {
                 "*2\r\n$6\r\nSELECT\r\n$%d\r\n%s\r\n",
                 dictid_len, dictid_str));
     }
+    // 订阅和发布的相关response
     shared.messagebulk = createStringObject("$7\r\nmessage\r\n",13);
     shared.pmessagebulk = createStringObject("$8\r\npmessage\r\n",14);
     shared.subscribebulk = createStringObject("$9\r\nsubscribe\r\n",15);
     shared.unsubscribebulk = createStringObject("$11\r\nunsubscribe\r\n",18);
     shared.psubscribebulk = createStringObject("$10\r\npsubscribe\r\n",17);
     shared.punsubscribebulk = createStringObject("$12\r\npunsubscribe\r\n",19);
+    // 常用命令
     shared.del = createStringObject("DEL",3);
     shared.rpop = createStringObject("RPOP",4);
     shared.lpop = createStringObject("LPOP",4);
     shared.lpush = createStringObject("LPUSH",5);
+    // 常用的整数
     for (j = 0; j < OBJ_SHARED_INTEGERS; j++) {
         shared.integers[j] = createObject(OBJ_STRING,(void*)(long)j);
         shared.integers[j]->encoding = OBJ_ENCODING_INT;
     }
+    // 常用的长度bulk或者multi bulk回复
     for (j = 0; j < OBJ_SHARED_BULKHDR_LEN; j++) {
         shared.mbulkhdr[j] = createObject(OBJ_STRING,
             sdscatprintf(sdsempty(),"*%d\r\n",j));
@@ -1458,13 +1481,22 @@ void createSharedObjects(void) {
 void initServerConfig(void) {
     int j;
 
+    // 随机生成server的运行id
     getRandomHexChars(server.runid,CONFIG_RUN_ID_SIZE);
+    // 设置默认的配置文件的路径
     server.configfile = NULL;
+    // 设置默认的执行文件的路径
     server.executable = NULL;
+    // 设置默认的执行频率
     server.hz = CONFIG_DEFAULT_HZ;
+    // 给服务器运行id加上结尾字符
     server.runid[CONFIG_RUN_ID_SIZE] = '\0';
+    // 获取并设置运行redis server的主机的系统架构(64位 or 32位操作系统)
     server.arch_bits = (sizeof(long) == 8) ? 64 : 32;
+    // 设置服务器的默认端口
     server.port = CONFIG_DEFAULT_SERVER_PORT;
+    // 当服务器执行listen监听请求的时候, 系统会让一个socket进入listen状态,
+    // backlog参数是用来描述新连接队列的长度限制
     server.tcp_backlog = CONFIG_DEFAULT_TCP_BACKLOG;
     server.bindaddr_count = 0;
     server.unixsocket = NULL;
@@ -1472,8 +1504,11 @@ void initServerConfig(void) {
     server.ipfd_count = 0;
     server.sofd = -1;
     server.protected_mode = CONFIG_DEFAULT_PROTECTED_MODE;
+    // 设置服务器默认的数据库数量
     server.dbnum = CONFIG_DEFAULT_DBNUM;
+    // 初始化loglevel
     server.verbosity = CONFIG_DEFAULT_VERBOSITY;
+	// 初始化客户端超时时间
     server.maxidletime = CONFIG_DEFAULT_CLIENT_TIMEOUT;
     server.tcpkeepalive = CONFIG_DEFAULT_TCP_KEEPALIVE;
     server.active_expire_enabled = 1;
@@ -1542,13 +1577,17 @@ void initServerConfig(void) {
     server.loading_process_events_interval_bytes = (1024*1024*2);
     server.lua_time_limit = LUA_SCRIPT_TIME_LIMIT;
 
+	// 初始化lru时间
     server.lruclock = getLRUClock();
+	// 初始化保存条件(save字段)
     resetServerSaveParams();
 
+	// 保存默认的几个save策略
     appendServerSaveParams(60*60,1);  /* save after 1 hour and 1 change */
     appendServerSaveParams(300,100);  /* save after 5 minutes and 100 changes */
     appendServerSaveParams(60,10000); /* save after 1 minute and 10000 changes */
     /* Replication related */
+	// 初始化主从版的相关配置
     server.masterauth = NULL;
     server.masterhost = NULL;
     server.masterport = 6379;
@@ -1569,6 +1608,7 @@ void initServerConfig(void) {
     server.master_repl_offset = 0;
 
     /* Replication partial resync backlog */
+	// 初始化psync命令需要的backlog
     server.repl_backlog = NULL;
     server.repl_backlog_size = CONFIG_DEFAULT_REPL_BACKLOG_SIZE;
     server.repl_backlog_histlen = 0;
@@ -1578,6 +1618,7 @@ void initServerConfig(void) {
     server.repl_no_slaves_since = time(NULL);
 
     /* Client output buffer limits */
+	// 设置对客户端的输出缓冲区限制
     for (j = 0; j < CLIENT_TYPE_OBUF_COUNT; j++)
         server.client_obuf_limits[j] = clientBufferLimitsDefaults[j];
 
@@ -1590,6 +1631,8 @@ void initServerConfig(void) {
     /* Command table -- we initiialize it here as it is part of the
      * initial configuration, since command names may be changed via
      * redis.conf using the rename-command directive. */
+	// 初始化cmd表
+	// 在这里初始化是因为 用户可以在redis.conf中对这些命令进行重命名或者屏蔽
     server.commands = dictCreate(&commandTableDictType,NULL);
     server.orig_commands = dictCreate(&commandTableDictType,NULL);
     populateCommandTable();
@@ -1604,10 +1647,12 @@ void initServerConfig(void) {
     server.pexpireCommand = lookupCommandByCString("pexpire");
 
     /* Slow log */
+	// 初始化慢查询日志的配置
     server.slowlog_log_slower_than = CONFIG_DEFAULT_SLOWLOG_LOG_SLOWER_THAN;
     server.slowlog_max_len = CONFIG_DEFAULT_SLOWLOG_MAX_LEN;
 
     /* Latency monitor */
+	// 初始化monitor配置
     server.latency_monitor_threshold = CONFIG_DEFAULT_LATENCY_MONITOR_THRESHOLD;
 
     /* Debugging */
@@ -1673,6 +1718,7 @@ int restartServer(int flags, mstime_t delay) {
  * If it will not be possible to set the limit accordingly to the configured
  * max number of clients, the function will do the reverse setting
  * server.maxclients to the value that we can actually handle. */
+// 根据配置的同时支持最大数量的客户端, 尝试调整开启文件的最大数量
 void adjustOpenFilesLimit(void) {
     rlim_t maxfiles = server.maxclients+CONFIG_MIN_RESERVED_FDS;
     struct rlimit limit;
@@ -1747,6 +1793,8 @@ void adjustOpenFilesLimit(void) {
 
 /* Check that server.tcp_backlog can be actually enforced in Linux according
  * to the value of /proc/sys/net/core/somaxconn, or warn about it. */
+// 校验server的tcp_backlog的配置, 使其与linux内核配置somaxconn相匹配,
+// 如果不匹配, 需要输出警告日志
 void checkTcpBacklogSettings(void) {
 #ifdef HAVE_PROC_SOMAXCONN
     FILE *fp = fopen("/proc/sys/net/core/somaxconn","r");
@@ -1780,20 +1828,26 @@ void checkTcpBacklogSettings(void) {
  * impossible to bind, or no bind addresses were specified in the server
  * configuration but the function is not able to bind * for at least
  * one of the IPv4 or IPv6 protocols. */
+// 创建一批文件描述符去监听绑定到固定地址的端口port,
+// 文件描述符存储到fds中, 文件描述符数量存储在count中
 int listenToPort(int port, int *fds, int *count) {
     int j;
 
     /* Force binding of 0.0.0.0 if no bind address is specified, always
      * entering the loop if j == 0. */
+    // 如果没有指定绑定的地址, 就强制绑定0.0.0.0
     if (server.bindaddr_count == 0) server.bindaddr[0] = NULL;
     for (j = 0; j < server.bindaddr_count || j == 0; j++) {
+        // 用户没有指定绑定的ip
         if (server.bindaddr[j] == NULL) {
             int unsupported = 0;
             /* Bind * for both IPv6 and IPv4, we enter here only if
              * server.bindaddr_count == 0. */
+            // 创建ipv6的tcp端口, 并开启tcp server
             fds[*count] = anetTcp6Server(server.neterr,port,NULL,
                 server.tcp_backlog);
             if (fds[*count] != ANET_ERR) {
+                // 设置端口非阻塞
                 anetNonBlock(NULL,fds[*count]);
                 (*count)++;
             } else if (errno == EAFNOSUPPORT) {
@@ -1803,9 +1857,11 @@ int listenToPort(int port, int *fds, int *count) {
 
             if (*count == 1 || unsupported) {
                 /* Bind the IPv4 address as well. */
+                // 绑定ipv4的tcp端口, 并开启tcp server
                 fds[*count] = anetTcpServer(server.neterr,port,NULL,
                     server.tcp_backlog);
                 if (fds[*count] != ANET_ERR) {
+                    // 设置端口非阻塞
                     anetNonBlock(NULL,fds[*count]);
                     (*count)++;
                 } else if (errno == EAFNOSUPPORT) {
@@ -1816,12 +1872,17 @@ int listenToPort(int port, int *fds, int *count) {
             /* Exit the loop if we were able to bind * on IPv4 and IPv6,
              * otherwise fds[*count] will be ANET_ERR and we'll print an
              * error and return to the caller with an error. */
+            // 如果已经绑定了ipv4和ipv6的端口, 就退出循环
             if (*count + unsupported == 2) break;
         } else if (strchr(server.bindaddr[j],':')) {
+            // 如果用户提供了需要绑定的ipv6的地址
+            // 那么直接绑定这个地址, 并开启ipv6的tcp server
             /* Bind IPv6 address. */
             fds[*count] = anetTcp6Server(server.neterr,port,server.bindaddr[j],
                 server.tcp_backlog);
         } else {
+            // 如果用户提供了需要绑定的ipv4的地址
+            // 那么直接绑定这个地址, 并开启ipv4的tcp server
             /* Bind IPv4 address. */
             fds[*count] = anetTcpServer(server.neterr,port,server.bindaddr[j],
                 server.tcp_backlog);
@@ -1833,6 +1894,7 @@ int listenToPort(int port, int *fds, int *count) {
                 port, server.neterr);
             return C_ERR;
         }
+        // 设置端口非阻塞
         anetNonBlock(NULL,fds[*count]);
         (*count)++;
     }
@@ -1869,18 +1931,22 @@ void resetServerStats(void) {
     server.aof_delayed_fsync = 0;
 }
 
+// 初始化server
 void initServer(void) {
     int j;
 
+    // 设置信号处理函数
     signal(SIGHUP, SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
     setupSignalHandlers();
 
+    // 检测是否需要开启syslog
     if (server.syslog_enabled) {
         openlog(server.syslog_ident, LOG_PID | LOG_NDELAY | LOG_NOWAIT,
             server.syslog_facility);
     }
 
+    // 初始化server结构体
     server.pid = getpid();
     server.current_client = NULL;
     server.clients = listCreate();
@@ -1896,17 +1962,22 @@ void initServer(void) {
     server.clients_paused = 0;
     server.system_memory_size = zmalloc_get_memory_size();
 
+    // 创建常用的共享对象
     createSharedObjects();
+    // 调整最大打开的文件数量
     adjustOpenFilesLimit();
+    // 创建事件循环对象
     server.el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
     server.db = zmalloc(sizeof(redisDb)*server.dbnum);
 
     /* Open the TCP listening socket for the user commands. */
+    // 打开TCP监听端口, 用于等待客户端的命令请求
     if (server.port != 0 &&
         listenToPort(server.port,server.ipfd,&server.ipfd_count) == C_ERR)
         exit(1);
 
     /* Open the listening Unix domain socket. */
+    // 如果使用linux套接字, 则使用下面的方法
     if (server.unixsocket != NULL) {
         unlink(server.unixsocket); /* don't care if this fails */
         server.sofd = anetUnixServer(server.neterr,server.unixsocket,
@@ -1919,12 +1990,14 @@ void initServer(void) {
     }
 
     /* Abort if there are no listening sockets at all. */
+    // 如果这个server没有监听任何的socket, 那么就退出
     if (server.ipfd_count == 0 && server.sofd < 0) {
         serverLog(LL_WARNING, "Configured to not listen anywhere, exiting.");
         exit(1);
     }
 
     /* Create the Redis databases, and initialize other internal state. */
+    // 创建并初始化数据库的结构
     for (j = 0; j < server.dbnum; j++) {
         server.db[j].dict = dictCreate(&dbDictType,NULL);
         server.db[j].expires = dictCreate(&keyptrDictType,NULL);
@@ -1935,10 +2008,13 @@ void initServer(void) {
         server.db[j].id = j;
         server.db[j].avg_ttl = 0;
     }
+    // 创建pubsub的相关结构
     server.pubsub_channels = dictCreate(&keylistDictType,NULL);
     server.pubsub_patterns = listCreate();
     listSetFreeMethod(server.pubsub_patterns,freePubsubPattern);
     listSetMatchMethod(server.pubsub_patterns,listMatchPubsubPattern);
+
+    // 初始化其他配置
     server.cronloops = 0;
     server.rdb_child_pid = -1;
     server.aof_child_pid = -1;
@@ -1964,6 +2040,7 @@ void initServer(void) {
 
     /* Create the serverCron() time event, that's our main way to process
      * background operations. */
+    // 给serverCron函数创建时间事件, 它是我们在background去执行操作的最主要的方法
     if(aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL) == AE_ERR) {
         serverPanic("Can't create the serverCron time event.");
         exit(1);
@@ -1971,7 +2048,10 @@ void initServer(void) {
 
     /* Create an event handler for accepting new connections in TCP and Unix
      * domain sockets. */
+    // 为tcp连接的accept事件创建事件处理器
+    // 这个事件处理器用来接收并应答客户端的connect调用
     for (j = 0; j < server.ipfd_count; j++) {
+        // 为函数acceptTcpHandler函数创建写事件循环
         if (aeCreateFileEvent(server.el, server.ipfd[j], AE_READABLE,
             acceptTcpHandler,NULL) == AE_ERR)
             {
@@ -1979,13 +2059,16 @@ void initServer(void) {
                     "Unrecoverable error creating server.ipfd file event.");
             }
     }
+    // 为linux套接字关联应答处理器
     if (server.sofd > 0 && aeCreateFileEvent(server.el,server.sofd,AE_READABLE,
         acceptUnixHandler,NULL) == AE_ERR) serverPanic("Unrecoverable error creating server.sofd file event.");
 
     /* Open the AOF file if needed. */
+    // 如果aof持久化功能打开, 那么就打开或者创建一个aof文件
     if (server.aof_state == AOF_ON) {
         server.aof_fd = open(server.aof_filename,
                                O_WRONLY|O_APPEND|O_CREAT,0644);
+        // 打开失败, 退出
         if (server.aof_fd == -1) {
             serverLog(LL_WARNING, "Can't open the append-only file: %s",
                 strerror(errno));
@@ -1997,17 +2080,25 @@ void initServer(void) {
      * no explicit limit in the user provided configuration we set a limit
      * at 3 GB using maxmemory with 'noeviction' policy'. This avoids
      * useless crashes of the Redis instance for out of memory. */
+    // 对于32位系统来说, 内存最大为4gb, 所以这里需要默认将最大可用内存限制
+    // 在3GB, 来防止意外的系统崩溃
     if (server.arch_bits == 32 && server.maxmemory == 0) {
         serverLog(LL_WARNING,"Warning: 32 bit instance detected but no memory limit set. Setting 3 GB maxmemory limit with 'noeviction' policy now.");
         server.maxmemory = 3072LL*(1024*1024); /* 3 GB */
         server.maxmemory_policy = MAXMEMORY_NO_EVICTION;
     }
 
+    // 如果server开启了cluster模式, 那么初始化cluster的相关配置
     if (server.cluster_enabled) clusterInit();
+    // 初始化复制功能相关的脚本缓存
     replicationScriptCacheInit();
+    // 初始化脚本系统
     scriptingInit(1);
+    // 初始化慢查询功能
     slowlogInit();
+    // 初始化monitor功能
     latencyMonitorInit();
+    // 初始化bio系统
     bioInit();
 }
 
@@ -3655,9 +3746,11 @@ int linuxOvercommitMemoryValue(void) {
 }
 
 void linuxMemoryWarnings(void) {
+    // 如果没有设置overcommit_memory这一项, 输入日志
     if (linuxOvercommitMemoryValue() == 0) {
         serverLog(LL_WARNING,"WARNING overcommit_memory is set to 0! Background save may fail under low memory condition. To fix this issue add 'vm.overcommit_memory = 1' to /etc/sysctl.conf and then reboot or run the command 'sysctl vm.overcommit_memory=1' for this to take effect.");
     }
+    // 如果THP还没有关闭, 输出日志
     if (THPIsEnabled()) {
         serverLog(LL_WARNING,"WARNING you have Transparent Huge Pages (THP) support enabled in your kernel. This will create latency and memory usage issues with Redis. To fix this issue run the command 'echo never > /sys/kernel/mm/transparent_hugepage/enabled' as root, and add it to your /etc/rc.local in order to retain the setting after a reboot. Redis must be restarted after THP is disabled.");
     }
@@ -3996,7 +4089,9 @@ int main(int argc, char **argv) {
     srand(time(NULL)^getpid());
     gettimeofday(&tv,NULL);
     dictSetHashFunctionSeed(tv.tv_sec^tv.tv_usec^getpid());
+    // 检查server是否以sentinel模式启动
     server.sentinel_mode = checkForSentinelMode(argc,argv);
+    // 初始化server的配置
     initServerConfig();
 
     /* Store the executable path and arguments in a safe place in order
@@ -4009,6 +4104,7 @@ int main(int argc, char **argv) {
     /* We need to init sentinel right now as parsing the configuration file
      * in sentinel mode will have the effect of populating the sentinel
      * data structures with master nodes to monitor. */
+	// 如果redis server使用sentinel模式启动, 就需要进行sentinel的相关功能的初始化
     if (server.sentinel_mode) {
         initSentinelConfig();
         initSentinel();
@@ -4017,15 +4113,18 @@ int main(int argc, char **argv) {
     /* Check if we need to start in redis-check-rdb mode. We just execute
      * the program main. However the program is part of the Redis executable
      * so that we can easily execute an RDB check on loading errors. */
+    // 根据参数来判断是否需要以 检查rdb 模式来启动server
     if (strstr(argv[0],"redis-check-rdb") != NULL)
         redis_check_rdb_main(argc,argv);
 
+    // 检查用户是否指定了redis的配置文件(或者配置项)
     if (argc >= 2) {
         j = 1; /* First option to parse in argv[] */
         sds options = sdsempty();
         char *configfile = NULL;
 
         /* Handle special options --help and --version */
+        // 处理几个特殊选项: -v, -h, --test-memory
         if (strcmp(argv[1], "-v") == 0 ||
             strcmp(argv[1], "--version") == 0) version();
         if (strcmp(argv[1], "--help") == 0 ||
@@ -4042,11 +4141,14 @@ int main(int argc, char **argv) {
         }
 
         /* First argument is the config file name? */
+        // 如果第一个参数不是使用"-"或者"--"开头, 那么这个参数就是配置文件了
         if (argv[j][0] != '-' || argv[j][1] != '-') {
             configfile = argv[j];
+            // 设置server的配置文件路径
             server.configfile = getAbsolutePath(configfile);
             /* Replace the config file in server.exec_argv with
              * its absoulte path. */
+            // 把server.exec_argv更新为配置文件的绝对路径
             zfree(server.exec_argv[j]);
             server.exec_argv[j] = zstrdup(server.configfile);
             j++;
@@ -4056,8 +4158,12 @@ int main(int argc, char **argv) {
          * configuration file. For instance --port 6380 will generate the
          * string "port 6380\n" to be parsed after the actual file name
          * is parsed, if any. */
+        // 分析了第一项(也就是配置文件路径)之后, 再根据用户给定的其余选项进行
+        // 分析, 后续的参数应该都是配置项
+        // 分析后的配置项都存储在options这个sds中
         while(j != argc) {
             if (argv[j][0] == '-' && argv[j][1] == '-') {
+                // 以"-"或"--"开头的配置
                 /* Option name */
                 if (!strcmp(argv[j], "--check-rdb")) {
                     /* Argument has no options, need to skip for parsing. */
@@ -4068,6 +4174,7 @@ int main(int argc, char **argv) {
                 options = sdscat(options,argv[j]+2);
                 options = sdscat(options," ");
             } else {
+                // 其他的配置
                 /* Option argument */
                 options = sdscatrepr(options,argv[j],strlen(argv[j]));
                 options = sdscat(options," ");
@@ -4081,30 +4188,46 @@ int main(int argc, char **argv) {
                 "Sentinel needs config file on disk to save state.  Exiting...");
             exit(1);
         }
+        // 重置配置中的save项(负责持久化操作)
         resetServerSaveParams();
+        // 把配置文件和以命令行形式指定的的配置项载入到server的配置中
         loadServerConfig(configfile,options);
+        // 释放空间
         sdsfree(options);
     } else {
+        // 用户没有指定配置文件, 以及配置项, 使用默认配置
         serverLog(LL_WARNING, "Warning: no config file specified, using the default config. In order to specify a config file use %s /path/to/%s.conf", argv[0], server.sentinel_mode ? "sentinel" : "redis");
     }
 
+    // 确定server是否需要监控
     server.supervised = redisIsSupervised(server.supervised_mode);
     int background = server.daemonize && !server.supervised;
+    // 将服务器设置为守护进程
     if (background) daemonize();
 
+    // 创建并初始化服务器的数据结构
     initServer();
+    // 如果服务器是守护进程, 或者指定了pid, 那么就创建PID文件
     if (background || server.pidfile) createPidFile();
+    // 为server的进程设置名字
     redisSetProcTitle(argv[0]);
+    // 日志输出logo
     redisAsciiArt();
+    // 校验tcp_backlog配置, 与内核参数是否匹配
     checkTcpBacklogSettings();
 
+    // 如果server的运行并不是sentinel模式, 执行下面的代码
     if (!server.sentinel_mode) {
         /* Things not needed when running in Sentinel mode. */
         serverLog(LL_WARNING,"Server started, Redis version " REDIS_VERSION);
     #ifdef __linux__
+        // 输出内存警告, 主要是根据overcommit_memory的配置以及THP是否关闭的
+        // 情况, 输出警告日志
         linuxMemoryWarnings();
     #endif
+        // 从AOF或者RDB文件中载入数据
         loadDataFromDisk();
+        // 如果server的集群模式开启, 执行下面的代码
         if (server.cluster_enabled) {
             if (verifyClusterConfigWithData() == C_ERR) {
                 serverLog(LL_WARNING,
@@ -4113,8 +4236,10 @@ int main(int argc, char **argv) {
                 exit(1);
             }
         }
+        // 记录TCP端口
         if (server.ipfd_count > 0)
             serverLog(LL_NOTICE,"The server is now ready to accept connections on port %d", server.port);
+        // 记录本地套接字端口
         if (server.sofd > 0)
             serverLog(LL_NOTICE,"The server is now ready to accept connections at %s", server.unixsocket);
     } else {
@@ -4122,12 +4247,15 @@ int main(int argc, char **argv) {
     }
 
     /* Warning the user about suspicious maxmemory setting. */
+    // 检测redis消耗的最大内存的配置是否合法
     if (server.maxmemory > 0 && server.maxmemory < 1024*1024) {
         serverLog(LL_WARNING,"WARNING: You specified a maxmemory value that is less than 1MB (current value is %llu bytes). Are you sure this is what you really want?", server.maxmemory);
     }
 
+    // 运行事件处理器, 一直到server终止为止
     aeSetBeforeSleepProc(server.el,beforeSleep);
     aeMain(server.el);
+    // server关闭, 停止事件循环
     aeDeleteEventLoop(server.el);
     return 0;
 }

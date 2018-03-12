@@ -455,6 +455,7 @@ int d2string(char *buf, size_t len, double value) {
  * given execution of Redis, so that if you are talking with an instance
  * having run_id == A, and you reconnect and it has run_id == B, you can be
  * sure that it is either a different instance or it was restarted. */
+// 生成一个redis的运行id, 这个id是一个长度固定的随机数.
 void getRandomHexChars(char *p, unsigned int len) {
     char *charset = "0123456789abcdef";
     unsigned int j;
@@ -465,10 +466,12 @@ void getRandomHexChars(char *p, unsigned int len) {
     static uint64_t counter = 0; /* The counter we hash with the seed. */
 
     if (!seed_initialized) {
+        // 没有初始化随机数种子
         /* Initialize a seed and use SHA1 in counter mode, where we hash
          * the same seed with a progressive counter. For the goals of this
          * function we just need non-colliding strings, there are no
          * cryptographic security needs. */
+        // 从/dev/urandom获取随机数, 作为种子
         FILE *fp = fopen("/dev/urandom","r");
         if (fp && fread(seed,sizeof(seed),1,fp) == 1)
             seed_initialized = 1;
