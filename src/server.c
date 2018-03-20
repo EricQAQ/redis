@@ -1073,6 +1073,8 @@ void databasesCron(void) {
  * virtual memory and aging there is to store the current time in objects at
  * every object access, and accuracy is not needed. To access a global var is
  * a lot faster than calling time(NULL) */
+// 我们在全局状态下获取unix时间的缓存值，因为虚拟内存和老化会将当前时间存储
+// 在每个对象访问的对象中，并且不需要准确性。访问全局变量比调用时间快
 void updateCachedTime(void) {
     server.unixtime = time(NULL);
     server.mstime = mstime();
@@ -1109,7 +1111,7 @@ void updateCachedTime(void) {
 //
 // 因为serverCron函数里面的所有代码每秒都会调用server.hz次, 所有为了控制对部分
 // 代码的调用次数, 使用了一个宏: run_with_period, 它可以将被包含代码的执行次数
-// 降低为每个millisecond执行一次
+// 降低为每毫秒执行一次
 int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     int j;
     UNUSED(eventLoop);
@@ -1118,9 +1120,11 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     /* Software watchdog: deliver the SIGALRM that will reach the signal
      * handler if we don't return here fast enough. */
+    // 如果开启了watchdog功能, 就加入watchdog的信号
     if (server.watchdog_period) watchdogScheduleSignal(server.watchdog_period);
 
     /* Update the time cache. */
+    // 更新全局变量server的时间戳
     updateCachedTime();
 
     run_with_period(100) {
@@ -1145,6 +1149,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     server.lruclock = getLRUClock();
 
     /* Record the max memory used since the server was started. */
+    // 记录服务器的内存峰值
     if (zmalloc_used_memory() > server.stat_peak_memory)
         server.stat_peak_memory = zmalloc_used_memory();
 
@@ -1153,13 +1158,18 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     /* We received a SIGTERM, shutting down here in a safe way, as it is
      * not ok doing so inside the signal handler. */
+    // 当server进程收到SIGTERM信号的时候, 关闭server
     if (server.shutdown_asap) {
+        // 尝试关闭server
         if (prepareForShutdown(SHUTDOWN_NOFLAGS) == C_OK) exit(0);
+        // 如果关闭失败, 就记录日志
         serverLog(LL_WARNING,"SIGTERM received but errors trying to shut down the server, check the logs for more information");
+        // 移除关闭服务器的flag
         server.shutdown_asap = 0;
     }
 
     /* Show some info about non-empty databases */
+    // 打印数据库的键值对信息
     run_with_period(5000) {
         for (j = 0; j < server.dbnum; j++) {
             long long size, used, vkeys;
@@ -1175,6 +1185,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
 
     /* Show information about connected clients */
+    // 如果server没有运行sentinel模式, 那么打印客户端的连接信息
     if (!server.sentinel_mode) {
         run_with_period(5000) {
             serverLog(LL_VERBOSE,
@@ -1186,13 +1197,17 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
 
     /* We need to do a few operations on clients asynchronously. */
+    // 检查客户端, 关闭超时的客户端, 并释放客户端多余的缓冲区
     clientsCron();
 
     /* Handle background operations on Redis databases. */
+    // 对数据库执行操作
     databasesCron();
 
     /* Start a scheduled AOF rewrite if this was requested by the user while
      * a BGSAVE was in progress. */
+    // 如果没有bgsave和bgrewriteaof在执行, 同时有一个bgrewriteaof在等待,
+    // 那么就执行bgrewriteaof
     if (server.rdb_child_pid == -1 && server.aof_child_pid == -1 &&
         server.aof_rewrite_scheduled)
     {
@@ -1200,18 +1215,35 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
 
     /* Check if a background saving or AOF rewrite in progress terminated. */
+    // 检查是否有bgsave和bgrewriteaof在执行
     if (server.rdb_child_pid != -1 || server.aof_child_pid != -1 ||
         ldbPendingChildren())
     {
         int statloc;
         pid_t pid;
 
+        // wait3函数的原型: pid_t wait3(int *status, int option, struct rusage *ru)
+        // option的可选值: WNOHANG, WCONTINUED, WUNTRACED
+        // 非阻塞的接收子进程发来的信号, 如果没有子进程, 就返回-1, 进程结束状态会存储在status中
+        // 其实就是用来检测是否有子进程在执行
         if ((pid = wait3(&statloc,WNOHANG,NULL)) != 0) {
+            // 几种宏:
+            // 1. int WIFEXITED(int status) 如果进程正常退出, 返回非零整数
+            // 2. int WEXITSTATUS(int status) 如果进程正常退出, 返回8位的退出状态
+            // 3. int WIFSIGNALED(int status) 如果进程收到了一个无法处理的信号,
+            //                                而导致进程终止, 则返回非零参数
+            // 4. int WTERMSIG(int status) 获取信号的代码, 通常在WIFSIGNALED宏
+            //                             的值不为0的时候使用
+            // 5. int WIFSTOPPED(int status) 判断进程是否处于暂停执行的状态,
+            //                               通常wait3的参数为WUNTRACED才会使用
+            // 6. int WSTOPSIG(int status) 获取引发进程暂停的信号代码
             int exitcode = WEXITSTATUS(statloc);
             int bysignal = 0;
 
+            // 如果子进程因为信号而结束, 那么获取这个信号代码
             if (WIFSIGNALED(statloc)) bysignal = WTERMSIG(statloc);
 
+            // 不存在子进程
             if (pid == -1) {
                 serverLog(LL_WARNING,"wait3() returned an error: %s. "
                     "rdb_child_pid = %d, aof_child_pid = %d",
@@ -1219,10 +1251,13 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
                     (int) server.rdb_child_pid,
                     (int) server.aof_child_pid);
             } else if (pid == server.rdb_child_pid) {
+                // 子进程BGSAVE已经执行完毕
                 backgroundSaveDoneHandler(exitcode,bysignal);
             } else if (pid == server.aof_child_pid) {
+                // 子进程BGREWRITEAOF已经执行完毕
                 backgroundRewriteDoneHandler(exitcode,bysignal);
             } else {
+                // 执行了其他不明的子进程
                 if (!ldbRemoveChild(pid)) {
                     serverLog(LL_WARNING,
                         "Warning, detected child with unmatched pid: %ld",
@@ -1234,6 +1269,10 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     } else {
         /* If there is not a background saving/rewrite in progress check if
          * we have to save/rewrite now */
+
+        // 没有BGSAVE和BGREWRITEAOF在执行, 检查是否需要触发它们执行
+
+        // 遍历所有save的条件, 看看是否需要触发bgsave执行
          for (j = 0; j < server.saveparamslen; j++) {
             struct saveparam *sp = server.saveparams+j;
 
@@ -1241,6 +1280,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
              * the given amount of seconds, and if the latest bgsave was
              * successful or if, in case of an error, at least
              * CONFIG_BGSAVE_RETRY_DELAY seconds already elapsed. */
+            // 检查当前save条件是否已经满足触发bgsave了
             if (server.dirty >= sp->changes &&
                 server.unixtime-server.lastsave > sp->seconds &&
                 (server.unixtime-server.lastbgsave_try >
@@ -1249,22 +1289,28 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
             {
                 serverLog(LL_NOTICE,"%d changes in %d seconds. Saving...",
                     sp->changes, (int)sp->seconds);
+                // 执行bgsave命令
                 rdbSaveBackground(server.rdb_filename);
                 break;
             }
          }
 
          /* Trigger an AOF rewrite if needed */
+         // 如果需要, 则触发bgrewriteaof命令
          if (server.rdb_child_pid == -1 &&
              server.aof_child_pid == -1 &&
              server.aof_rewrite_perc &&
              server.aof_current_size > server.aof_rewrite_min_size)
          {
+            // 获取上次完成aof持久化后, aof文件的大小
             long long base = server.aof_rewrite_base_size ?
                             server.aof_rewrite_base_size : 1;
+            // aof文件当前的大小相对于上次写入后的aof文件的大小的百分比
             long long growth = (server.aof_current_size*100/base) - 100;
+            // 如果增长的大小的百分比超过一定程度, 则执行bgrewriteaof命令
             if (growth >= server.aof_rewrite_perc) {
                 serverLog(LL_NOTICE,"Starting automatic rewriting of AOF on %lld%% growth",growth);
+                // 执行bgrewriteaof命令
                 rewriteAppendOnlyFileBackground();
             }
          }
@@ -1273,6 +1319,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     /* AOF postponed flush: Try at every cron cycle if the slow fsync
      * completed. */
+    // 根据aof的策略, 考虑是否需要将aof缓冲区中的内容写入到aof文件中
     if (server.aof_flush_postponed_start) flushAppendOnlyFile(0);
 
     /* AOF write errors: in this case we have a buffer to flush as well and
@@ -1285,6 +1332,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
 
     /* Close clients that need to be closed asynchronous */
+    // 关闭那些需要异步关闭的客户端
     freeClientsInAsyncFreeQueue();
 
     /* Clear the paused clients flag if needed. */
@@ -1295,16 +1343,19 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     run_with_period(1000) replicationCron();
 
     /* Run the Redis Cluster cron. */
+    // 如果服务器运行在集群模式下, 执行集群操作
     run_with_period(100) {
         if (server.cluster_enabled) clusterCron();
     }
 
     /* Run the Sentinel timer if we are in sentinel mode. */
+    // 如果server开启了sentinel, 执行sentinel的函数
     run_with_period(100) {
         if (server.sentinel_mode) sentinelTimer();
     }
 
     /* Cleanup expired MIGRATE cached sockets. */
+    // 关闭掉migrate过期的端口
     run_with_period(1000) {
         migrateCloseTimedoutSockets();
     }
@@ -1316,6 +1367,8 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      * Note: this code must be after the replicationCron() call above so
      * make sure when refactoring this file to keep this order. This is useful
      * because we want to give priority to RDB savings for replication. */
+    // 如果bgsave的flag被设置了, 那么就准备执行bgsave.
+    // 这个是为了保证rdb优先于aof操作而进行的操作
     if (server.rdb_child_pid == -1 && server.aof_child_pid == -1 &&
         server.rdb_bgsave_scheduled &&
         (server.unixtime-server.lastbgsave_try > CONFIG_BGSAVE_RETRY_DELAY ||
@@ -1325,6 +1378,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
             server.rdb_bgsave_scheduled = 0;
     }
 
+    // 增加loop计数器
     server.cronloops++;
     return 1000/server.hz;
 }
