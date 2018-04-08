@@ -72,12 +72,15 @@ void rdbCheckThenExit(int linenum, char *reason, ...) {
     exit(1);
 }
 
+// 将长度为len的字符串数组p写入到rdb文件中
+// 写入成功返回len, 失败返回-1
 static int rdbWriteRaw(rio *rdb, void *p, size_t len) {
     if (rdb && rioWrite(rdb,p,len) == 0)
         return -1;
     return len;
 }
 
+// 将长度为1字节的字符type写入到rdb文件中
 int rdbSaveType(rio *rdb, unsigned char type) {
     return rdbWriteRaw(rdb,&type,1);
 }
@@ -261,15 +264,19 @@ ssize_t rdbSaveLzfBlob(rio *rdb, void *data, size_t compress_len,
 
     /* Data compressed! Let's save it on disk */
     byte = (RDB_ENCVAL<<6)|RDB_ENC_LZF;
+    // 写入标志位
     if ((n = rdbWriteRaw(rdb,&byte,1)) == -1) goto writeerr;
     nwritten += n;
 
+    // 写入压缩后的长度
     if ((n = rdbSaveLen(rdb,compress_len)) == -1) goto writeerr;
     nwritten += n;
 
+    // 写入原始长度
     if ((n = rdbSaveLen(rdb,original_len)) == -1) goto writeerr;
     nwritten += n;
 
+    // 写入数据
     if ((n = rdbWriteRaw(rdb,data,compress_len)) == -1) goto writeerr;
     nwritten += n;
 
@@ -373,18 +380,26 @@ ssize_t rdbSaveRawString(rio *rdb, unsigned char *s, size_t len) {
 }
 
 /* Save a long long value as either an encoded string or a string. */
+// 将输入的long long类型的value转换成一个特殊编码的字符串, 写入到rdb中
+// 函数返回在rdb中保存value所需要的字节数
 ssize_t rdbSaveLongLongAsStringObject(rio *rdb, long long value) {
     unsigned char buf[32];
     ssize_t n, nwritten = 0;
+    // 尝试以节省空间的方式编码整数值value
     int enclen = rdbEncodeInteger(value,buf);
     if (enclen > 0) {
+        // 编码成功, 直接写入编码后的缓存
         return rdbWriteRaw(rdb,buf,enclen);
     } else {
         /* Encode as string */
+        // 编码失败, 将整数值转换成对应的字符串来保存
+        // 因为这个值没办法使用节省空间的方式来进行编码
         enclen = ll2string((char*)buf,32,value);
         serverAssert(enclen < 32);
+        // 写入字符串长度
         if ((n = rdbSaveLen(rdb,enclen)) == -1) return -1;
         nwritten += n;
+        // 写入字符串
         if ((n = rdbWriteRaw(rdb,buf,enclen)) == -1) return -1;
         nwritten += n;
     }
@@ -392,11 +407,14 @@ ssize_t rdbSaveLongLongAsStringObject(rio *rdb, long long value) {
 }
 
 /* Like rdbSaveStringObjectRaw() but handle encoded objects */
+// 将给定的字符串对象存储到rdb中
 int rdbSaveStringObject(rio *rdb, robj *obj) {
     /* Avoid to decode the object, then encode it again, if the
      * object is already integer encoded. */
+    // 如果是int编码的字符串, 则进行特殊的编码处理
     if (obj->encoding == OBJ_ENCODING_INT) {
         return rdbSaveLongLongAsStringObject(rdb,(long)obj->ptr);
+    // 保存string编码的字符串
     } else {
         serverAssertWithInfo(NULL,obj,sdsEncodedObject(obj));
         return rdbSaveRawString(rdb,obj->ptr,sdslen(obj->ptr));
@@ -568,29 +586,40 @@ int rdbLoadObjectType(rio *rdb) {
 }
 
 /* Save a Redis object. Returns -1 on error, number of bytes written on success. */
+// 将给定的robj对象o, 存储到rdb文件中
+// 失败返回-1, 成功则返回存储的字节数
 ssize_t rdbSaveObject(rio *rdb, robj *o) {
     ssize_t n = 0, nwritten = 0;
 
+    // 保存字符串对象
     if (o->type == OBJ_STRING) {
         /* Save a string value */
         if ((n = rdbSaveStringObject(rdb,o)) == -1) return -1;
         nwritten += n;
+    // 保存列表对象
     } else if (o->type == OBJ_LIST) {
         /* Save a list value */
+        // list对象, 底层存储从3.2开始都是quicklist
         if (o->encoding == OBJ_ENCODING_QUICKLIST) {
             quicklist *ql = o->ptr;
             quicklistNode *node = ql->head;
 
+            // 写入list的长度
             if ((n = rdbSaveLen(rdb,ql->len)) == -1) return -1;
             nwritten += n;
 
+            // 循环遍历整个quicklist节点
             do {
                 if (quicklistNodeIsCompressed(node)) {
+                    // 如果该节点被压缩, 则
                     void *data;
+                    // 获取压缩节点的数据
                     size_t compress_len = quicklistGetLzf(node, &data);
+                    // 把压缩数据写入rdb文件
                     if ((n = rdbSaveLzfBlob(rdb,data,compress_len,node->sz)) == -1) return -1;
                     nwritten += n;
                 } else {
+                    // 如果节点没有被压缩, 直接写入该节点的数据
                     if ((n = rdbSaveRawString(rdb,node->zl,node->sz)) == -1) return -1;
                     nwritten += n;
                 }
@@ -598,51 +627,75 @@ ssize_t rdbSaveObject(rio *rdb, robj *o) {
         } else {
             serverPanic("Unknown list encoding");
         }
+    // 保存集合对象
     } else if (o->type == OBJ_SET) {
         /* Save a set value */
         if (o->encoding == OBJ_ENCODING_HT) {
+            // 如果集合存储结构是哈希表
             dict *set = o->ptr;
+            // 获取迭代器
             dictIterator *di = dictGetIterator(set);
             dictEntry *de;
 
+            // 把集合长度写入rdb
             if ((n = rdbSaveLen(rdb,dictSize(set))) == -1) return -1;
             nwritten += n;
 
+            // 遍历集合
             while((de = dictNext(di)) != NULL) {
+                // 获取key, 即集合的元素
                 robj *eleobj = dictGetKey(de);
+                // 把集合元素写入rdb
                 if ((n = rdbSaveStringObject(rdb,eleobj)) == -1) return -1;
                 nwritten += n;
             }
             dictReleaseIterator(di);
         } else if (o->encoding == OBJ_ENCODING_INTSET) {
+            // 如果集合存储结构是整数集合
+
+            // 获取集合长度
             size_t l = intsetBlobLen((intset*)o->ptr);
 
+            // 把数据写入rdb
             if ((n = rdbSaveRawString(rdb,o->ptr,l)) == -1) return -1;
             nwritten += n;
         } else {
             serverPanic("Unknown set encoding");
         }
+    // 保存有序集合对象
     } else if (o->type == OBJ_ZSET) {
         /* Save a sorted set value */
         if (o->encoding == OBJ_ENCODING_ZIPLIST) {
+            // 如果有序集合的存储结构是ziplist
+
+            // 获取ziplist占用的空间大小
             size_t l = ziplistBlobLen((unsigned char*)o->ptr);
 
+            // 把数据写入rdb
             if ((n = rdbSaveRawString(rdb,o->ptr,l)) == -1) return -1;
             nwritten += n;
         } else if (o->encoding == OBJ_ENCODING_SKIPLIST) {
+            // 如果有序集合的存储结构是skiplist
+            // 有序集合同时使用了skiplist和hash map,
+            // 所以遍历有序集合的时候, 只需要遍历哈希表就可以了
             zset *zs = o->ptr;
+            // 获取字典的迭代器
             dictIterator *di = dictGetIterator(zs->dict);
             dictEntry *de;
 
+            // 把哈希表占用的内存空间写入rdb
             if ((n = rdbSaveLen(rdb,dictSize(zs->dict))) == -1) return -1;
             nwritten += n;
 
+            // 遍历哈希表
             while((de = dictNext(di)) != NULL) {
-                robj *eleobj = dictGetKey(de);
-                double *score = dictGetVal(de);
+                robj *eleobj = dictGetKey(de);      // 获取键
+                double *score = dictGetVal(de);     // 获取值
 
+                // 把键存储到rdb中
                 if ((n = rdbSaveStringObject(rdb,eleobj)) == -1) return -1;
                 nwritten += n;
+                // 把值存储到rdb中
                 if ((n = rdbSaveDoubleValue(rdb,*score)) == -1) return -1;
                 nwritten += n;
             }
@@ -650,27 +703,39 @@ ssize_t rdbSaveObject(rio *rdb, robj *o) {
         } else {
             serverPanic("Unknown sorted set encoding");
         }
+    // 保存哈希表
     } else if (o->type == OBJ_HASH) {
         /* Save a hash value */
         if (o->encoding == OBJ_ENCODING_ZIPLIST) {
+            // 如果hash的数据类型是ziplist
+
+            // 获取ziplist占用的内存空间
             size_t l = ziplistBlobLen((unsigned char*)o->ptr);
 
+            // 把数据存储到rdb中
             if ((n = rdbSaveRawString(rdb,o->ptr,l)) == -1) return -1;
             nwritten += n;
 
         } else if (o->encoding == OBJ_ENCODING_HT) {
+            // 如果hash的数据类型是哈希表
+
+            // 获取迭代器
             dictIterator *di = dictGetIterator(o->ptr);
             dictEntry *de;
 
+            // 把哈希表占用的内存空间写入rdb
             if ((n = rdbSaveLen(rdb,dictSize((dict*)o->ptr))) == -1) return -1;
             nwritten += n;
 
+            // 遍历哈希表
             while((de = dictNext(di)) != NULL) {
-                robj *key = dictGetKey(de);
-                robj *val = dictGetVal(de);
+                robj *key = dictGetKey(de);     // 获取键
+                robj *val = dictGetVal(de);     // 获取值
 
+                // 把键写入rdb中
                 if ((n = rdbSaveStringObject(rdb,key)) == -1) return -1;
                 nwritten += n;
+                // 把值写入rdb中
                 if ((n = rdbSaveStringObject(rdb,val)) == -1) return -1;
                 nwritten += n;
             }
@@ -700,18 +765,25 @@ size_t rdbSavedObjectLen(robj *o) {
  * On error -1 is returned.
  * On success if the key was actually saved 1 is returned, otherwise 0
  * is returned (the key was already expired). */
+// 将键值对, 过期时间, 类型写入rdb文件中
+// 如果成功保存, 则返回1, 如果该键值对已经过期, 则返回0, 失败返回-1
 int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val,
                         long long expiretime, long long now)
 {
     /* Save the expire time */
+    // 保存键的过期时间
     if (expiretime != -1) {
         /* If this key is already expired skip it */
+        // 不写入过期的键值对, 返回0
         if (expiretime < now) return 0;
+        // 写入标志位, 表示下面存储的是过期时间
         if (rdbSaveType(rdb,RDB_OPCODE_EXPIRETIME_MS) == -1) return -1;
+        // 写入过期时间
         if (rdbSaveMillisecondTime(rdb,expiretime) == -1) return -1;
     }
 
     /* Save type, key, value */
+    // 保存类型, 键, 值
     if (rdbSaveObjectType(rdb,val) == -1) return -1;
     if (rdbSaveStringObject(rdb,key) == -1) return -1;
     if (rdbSaveObject(rdb,val) == -1) return -1;
@@ -719,20 +791,26 @@ int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val,
 }
 
 /* Save an AUX field. */
+// 往rdb文件中写入一个AUX信息
 int rdbSaveAuxField(rio *rdb, void *key, size_t keylen, void *val, size_t vallen) {
+    // 写入AUX域的标识符
     if (rdbSaveType(rdb,RDB_OPCODE_AUX) == -1) return -1;
+    // 写入AUX信息的键
     if (rdbSaveRawString(rdb,key,keylen) == -1) return -1;
+    // 写入AUX信息的值
     if (rdbSaveRawString(rdb,val,vallen) == -1) return -1;
     return 1;
 }
 
 /* Wrapper for rdbSaveAuxField() used when key/val length can be obtained
  * with strlen(). */
+// 往rdb文件中写入值是string的一个AUX键值对
 int rdbSaveAuxFieldStrStr(rio *rdb, char *key, char *val) {
     return rdbSaveAuxField(rdb,key,strlen(key),val,strlen(val));
 }
 
 /* Wrapper for strlen(key) + integer type (up to long long range). */
+// 往rdb文件中写入值是int的一个AUX键值对
 int rdbSaveAuxFieldStrInt(rio *rdb, char *key, long long val) {
     char buf[LONG_STR_SIZE];
     int vlen = ll2string(buf,sizeof(buf),val);
@@ -740,10 +818,13 @@ int rdbSaveAuxFieldStrInt(rio *rdb, char *key, long long val) {
 }
 
 /* Save a few default AUX fields with information about the RDB generated. */
+// 在rdb文件创建的时候, 往rdb文件中写入默认的AUX信息
 int rdbSaveInfoAuxFields(rio *rdb) {
+    // 判断server所在的机器是32位系统还是64位系统
     int redis_bits = (sizeof(void*) == 8) ? 64 : 32;
 
     /* Add a few fields about the state when the RDB was created. */
+    // 在rdb文件被创建的时候, 写入一些基础信息
     if (rdbSaveAuxFieldStrStr(rdb,"redis-ver",REDIS_VERSION) == -1) return -1;
     if (rdbSaveAuxFieldStrInt(rdb,"redis-bits",redis_bits) == -1) return -1;
     if (rdbSaveAuxFieldStrInt(rdb,"ctime",time(NULL)) == -1) return -1;
@@ -767,21 +848,31 @@ int rdbSaveRio(rio *rdb, int *error) {
     long long now = mstime();
     uint64_t cksum;
 
+    // 设置校验和函数
     if (server.rdb_checksum)
         rdb->update_cksum = rioGenericUpdateChecksum;
+    // 写入RDB版本号: 构造版本号字符串, 写入文件
     snprintf(magic,sizeof(magic),"REDIS%04d",RDB_VERSION);
     if (rdbWriteRaw(rdb,magic,9) == -1) goto werr;
+    // 写入AUX信息
     if (rdbSaveInfoAuxFields(rdb) == -1) goto werr;
 
+    // 遍历所有数据库
     for (j = 0; j < server.dbnum; j++) {
+        // db指向当前遍历到的数据库
         redisDb *db = server.db+j;
+        // d指向当前数据库的键空间
         dict *d = db->dict;
+        // 跳过空数据库
         if (dictSize(d) == 0) continue;
+        // 为键空间创建迭代器, 用来遍历当前数据库的所有键
         di = dictGetSafeIterator(d);
         if (!di) return C_ERR;
 
         /* Write the SELECT DB opcode */
+        // 写入长度为1字节的标志位, 表示下面记录的是数据编号
         if (rdbSaveType(rdb,RDB_OPCODE_SELECTDB) == -1) goto werr;
+        // 写入数据库编号
         if (rdbSaveLen(rdb,j) == -1) goto werr;
 
         /* Write the RESIZE DB opcode. We trim the size to UINT32_MAX, which
@@ -789,24 +880,35 @@ int rdbSaveRio(rio *rdb, int *error) {
          * However this does not limit the actual size of the DB to load since
          * these sizes are just hints to resize the hash tables. */
         uint32_t db_size, expires_size;
+        // 统计当前数据库的大小
         db_size = (dictSize(db->dict) <= UINT32_MAX) ?
                                 dictSize(db->dict) :
                                 UINT32_MAX;
+        // 统计当前数据库中带过期时间的键值对
         expires_size = (dictSize(db->expires) <= UINT32_MAX) ?
                                 dictSize(db->expires) :
                                 UINT32_MAX;
+        // 写入标志位, 表示下面记录的是数据库的统计信息
         if (rdbSaveType(rdb,RDB_OPCODE_RESIZEDB) == -1) goto werr;
+        // 写入当前数据库大小
         if (rdbSaveLen(rdb,db_size) == -1) goto werr;
+        // 写入带有过期时间的键值对大小
         if (rdbSaveLen(rdb,expires_size) == -1) goto werr;
 
         /* Iterate this DB writing every entry */
+        // 遍历数据库, 写入每个键值对的数据
         while((de = dictNext(di)) != NULL) {
+            // 获取键
             sds keystr = dictGetKey(de);
+            // 获取值, 存储在o中
             robj key, *o = dictGetVal(de);
             long long expire;
 
+            // 根据keystr, 在栈上创建一个key的robj对象
             initStaticStringObject(key,keystr);
+            // 获取键的过期时间
             expire = getExpire(db,&key);
+            // 保存键值对数据
             if (rdbSaveKeyValuePair(rdb,&key,o,expire,now) == -1) goto werr;
         }
         dictReleaseIterator(di);
@@ -814,10 +916,13 @@ int rdbSaveRio(rio *rdb, int *error) {
     di = NULL; /* So that we don't release it again on error. */
 
     /* EOF opcode */
+    // 写入EOF标志
     if (rdbSaveType(rdb,RDB_OPCODE_EOF) == -1) goto werr;
 
     /* CRC64 checksum. It will be zero if checksum computation is disabled, the
      * loading code skips the check in this case. */
+    // CRC64校验和, 如果校验和功能关闭, 那么rdb.cksum将为0
+    // 在这种情况下, 载入rdb的时候会跳过校验和检查
     cksum = rdb->cksum;
     memrev64ifbe(&cksum);
     if (rioWrite(rdb,&cksum,8) == 0) goto werr;
@@ -856,6 +961,7 @@ werr: /* Write error. */
 }
 
 /* Save the DB on disk. Return C_ERR on error, C_OK on success. */
+// 进行rdb持久化的核心逻辑, 将数据保存到硬盘上
 int rdbSave(char *filename) {
     char tmpfile[256];
     char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
@@ -863,6 +969,7 @@ int rdbSave(char *filename) {
     rio rdb;
     int error = 0;
 
+    // 创建rdb临时文件
     snprintf(tmpfile,256,"temp-%d.rdb", (int) getpid());
     fp = fopen(tmpfile,"w");
     if (!fp) {
@@ -876,6 +983,7 @@ int rdbSave(char *filename) {
         return C_ERR;
     }
 
+    // 初始化文件流
     rioInitWithFile(&rdb,fp);
     if (rdbSaveRio(&rdb,&error) == C_ERR) {
         errno = error;
@@ -915,23 +1023,34 @@ werr:
     return C_ERR;
 }
 
+// 用来做rdb持久化的函数, 参数filename是用户指定的rdb持久化文件名
 int rdbSaveBackground(char *filename) {
     pid_t childpid;
     long long start;
 
+    // 如果server已经有用来做aof或者rdb的持久化子进程在运行, 则返回错误
     if (server.aof_child_pid != -1 || server.rdb_child_pid != -1) return C_ERR;
 
+    // 记录bgsave执行前的时候, 数据库被修改过的次数
     server.dirty_before_bgsave = server.dirty;
+    // 更新最近一次尝试进行bgsave的时间
     server.lastbgsave_try = time(NULL);
 
+    // fork()函数开始前的时间, 用来记录fork()返回的耗时
     start = ustime();
+    // 调用fork函数, 子进程中执行rdb持久化
     if ((childpid = fork()) == 0) {
+        // 子进程中
         int retval;
 
         /* Child */
+        // 关闭用于网络连接的fd
         closeListeningSockets(0);
+        // 设置子进程的标题, 方便追踪
         redisSetProcTitle("redis-rdb-bgsave");
+        // 执行保存的操作
         retval = rdbSave(filename);
+        // 记录copy-on-write所使用的内存大小
         if (retval == C_OK) {
             size_t private_dirty = zmalloc_get_private_dirty();
 
@@ -941,8 +1060,10 @@ int rdbSaveBackground(char *filename) {
                     private_dirty/(1024*1024));
             }
         }
+        // 向父进程发送信号
         exitFromChild((retval == C_OK) ? 0 : 1);
     } else {
+        // 主进程, 即server进程
         /* Parent */
         server.stat_fork_time = ustime()-start;
         server.stat_fork_rate = (double) zmalloc_used_memory() * 1000000 / server.stat_fork_time / (1024*1024*1024); /* GB per second. */

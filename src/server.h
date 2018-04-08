@@ -478,6 +478,7 @@ typedef struct redisObject {
  * Note that this macro is taken near the structure definition to make sure
  * we'll update it when the structure is changed, to avoid bugs like
  * bug #85 introduced exactly in this way. */
+// 这个宏用来在栈上申请空间并初始化一个robj对象
 #define initStaticStringObject(_var,_ptr) do { \
     _var.refcount = 1; \
     _var.type = OBJ_STRING; \

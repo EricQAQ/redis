@@ -63,22 +63,35 @@ struct _rio {
     /* Backend-specific vars. */
     union {
         /* In-memory buffer target. */
+        // 缓存结构体
         struct {
+            // 缓存指针
             sds ptr;
+            // 缓存偏移量
             off_t pos;
         } buffer;
         /* Stdio file pointer target. */
+        // 打开的文件结构体
         struct {
+            // 被打开的文件的指针
             FILE *fp;
+            // 从最近一次fsysnc(), 写入的字节量
             off_t buffered; /* Bytes written since last fsync. */
+            // 写入多少字节后, 才会自动执行一次fsync()
             off_t autosync; /* fsync after 'autosync' bytes written. */
         } file;
         /* Multiple FDs target (used to write to N sockets). */
+        // 多个文件描述符对象, 用来写入内容到n个fd中
         struct {
+            // 文件描述符列表
             int *fds;       /* File descriptors. */
+            // 每个fd的状态
             int *state;     /* Error state of each fd. 0 (if ok) or errno. */
+            // fd的数量
             int numfds;
+            // 偏移量
             off_t pos;
+            // 缓冲区
             sds buf;
         } fdset;
     } io;
@@ -90,6 +103,7 @@ typedef struct _rio rio;
  * actual implementation of read / write / tell, and will update the checksum
  * if needed. */
 
+// 将buf中的len字节写入到r中.
 static inline size_t rioWrite(rio *r, const void *buf, size_t len) {
     while (len) {
         size_t bytes_to_write = (r->max_processing_chunk && r->max_processing_chunk < len) ? r->max_processing_chunk : len;

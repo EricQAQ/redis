@@ -138,10 +138,15 @@ static int rioFileFlush(rio *r) {
     return (fflush(r->io.file.fp) == 0) ? 1 : 0;
 }
 
+// 文件流的结构对象
 static const rio rioFileIO = {
+    // 读函数
     rioFileRead,
+    // 写函数
     rioFileWrite,
+    // 偏移量函数
     rioFileTell,
+    // 文件刷新函数
     rioFileFlush,
     NULL,           /* update_checksum */
     0,              /* current checksum */
@@ -150,6 +155,7 @@ static const rio rioFileIO = {
     { { NULL, 0 } } /* union for io-specific vars */
 };
 
+// 初始化文件流
 void rioInitWithFile(rio *r, FILE *fp) {
     *r = rioFileIO;
     r->io.file.fp = fp;

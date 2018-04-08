@@ -1127,6 +1127,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     // 更新全局变量server的时间戳
     updateCachedTime();
 
+    // 更新统计变量
     run_with_period(100) {
         trackInstantaneousMetric(STATS_METRIC_COMMAND,server.stat_numcommands);
         trackInstantaneousMetric(STATS_METRIC_NET_INPUT,
@@ -1380,6 +1381,10 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     // 增加loop计数器
     server.cronloops++;
+    // 返回1000 / server.hz的原因是:
+    // serverCron函数是被processTimeEvents函数调用的(ae.c文件中), 在定时器任务触发调用这个
+    // 函数结束后, 需要更新下一次调用这个函数的时间, 那么就是 当前时间+该函数调用的时间间隔
+    // 这个函数的调用时间间隔 = 1000 / server.hz 毫秒
     return 1000/server.hz;
 }
 
@@ -2695,13 +2700,19 @@ int processCommand(client *c) {
 
 /* Close listening sockets. Also unlink the unix domain socket if
  * unlink_unix_socket is non-zero. */
+// 关闭监听的端口fd, 以及Unix Socket
+// 参数unlink_unix_socket用来标识是否解除unix socket的链接
 void closeListeningSockets(int unlink_unix_socket) {
     int j;
 
+    // 循环遍历server的socket fd, 关闭这些fd
     for (j = 0; j < server.ipfd_count; j++) close(server.ipfd[j]);
+    // 如果开启了unix socket, 则关闭这个unix socket fd
     if (server.sofd != -1) close(server.sofd);
+    // 如果server运行在集群状态下, 则关闭用于集群通信的socket
     if (server.cluster_enabled)
         for (j = 0; j < server.cfd_count; j++) close(server.cfd[j]);
+    // 解除unix socket连接
     if (unlink_unix_socket && server.unixsocket) {
         serverLog(LL_NOTICE,"Removing the unix socket file.");
         unlink(server.unixsocket); /* don't care if this fails */
@@ -3991,12 +4002,14 @@ void redisOutOfMemoryHandler(size_t allocation_size) {
     serverPanic("Redis aborting for OUT OF MEMORY");
 }
 
+// 为当前进程设置名称
 void redisSetProcTitle(char *title) {
 #ifdef USE_SETPROCTITLE
     char *server_mode = "";
     if (server.cluster_enabled) server_mode = " [cluster]";
     else if (server.sentinel_mode) server_mode = " [sentinel]";
 
+    // 根据给予的格式和对应的参数, 设置当前server进程的名称
     setproctitle("%s %s:%d%s",
         title,
         server.bindaddr_count ? server.bindaddr[0] : "*",

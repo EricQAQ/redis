@@ -89,6 +89,7 @@
 #define rdbIsObjectType(t) ((t >= 0 && t <= 4) || (t >= 9 && t <= 14))
 
 /* Special RDB opcodes (saved/loaded with rdbSaveType/rdbLoadType). */
+// 标志AUX域的开始位置
 #define RDB_OPCODE_AUX        250
 #define RDB_OPCODE_RESIZEDB   251
 #define RDB_OPCODE_EXPIRETIME_MS 252
